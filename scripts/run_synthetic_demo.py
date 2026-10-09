@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 import sys
@@ -13,8 +14,12 @@ import pandas as pd
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Run the workflow on fabricated, non-clinical records.")
+    parser.add_argument("--output-dir", type=Path, default=None)
+    args = parser.parse_args()
     project_root = Path(__file__).resolve().parents[1]
-    output_dir = project_root / "outputs" / "synthetic_e2e"
+    output_dir = args.output_dir or project_root / "outputs" / "synthetic_e2e"
+    output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     random_generator = np.random.default_rng(20261009)
 
@@ -24,7 +29,7 @@ def main() -> None:
         for patient in range(72):
             positive = patient % 4 == 0
             rows = []
-            for hour in range(8):
+            for hour in range(30):
                 rows.append({
                     "HR": 68 + patient % 13 + hour * (0.8 if positive else 0.15)
                     + random_generator.normal(0, 1),
@@ -61,6 +66,7 @@ def main() -> None:
                 "--data-dir", str(data_dir), "--output-dir", str(output_dir / "run"),
                 "--models", "logistic_regression", "random_forest", "xgboost",
                 "--cnn", "--cnn-epochs", "1", "--random-state", "2026",
+                "--synthetic-demo",
             ],
         ]
         for command in commands:

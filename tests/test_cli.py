@@ -22,6 +22,20 @@ def test_cli_validate_prints_json_serializable_counts(tmp_path, monkeypatch, cap
     assert report["patients"] == 1
     assert report["rows"] == 2
     assert report["positive_patient_files"] == 1
+    assert "files" not in report
+
+
+def test_cli_validate_lists_files_only_when_verbose(tmp_path, monkeypatch, capsys) -> None:
+    data_dir = tmp_path / "psv"
+    data_dir.mkdir()
+    pd.DataFrame({"SepsisLabel": [0]}).to_csv(data_dir / "patient.psv", sep="|", index=False)
+    monkeypatch.setattr(sys, "argv", [
+        "sepsis-pipeline", "validate", "--data-dir", str(data_dir), "--verbose",
+    ])
+
+    main()
+
+    assert json.loads(capsys.readouterr().out)["files"] == ["patient"]
 
 
 def test_cli_run_ingests_psv_and_writes_cohort_and_model_artifacts(tmp_path, monkeypatch) -> None:
@@ -44,6 +58,8 @@ def test_cli_run_ingests_psv_and_writes_cohort_and_model_artifacts(tmp_path, mon
         "--output-dir", str(output_dir),
         "--models", "logistic_regression",
         "--random-state", "17",
+        "--horizon-hours", "2",
+        "--synthetic-demo",
     ])
     main()
 
@@ -52,9 +68,11 @@ def test_cli_run_ingests_psv_and_writes_cohort_and_model_artifacts(tmp_path, mon
     assert cohort == {
         "eligible_patients": 30,
         "positive_outcomes": 10,
+        "horizon_hours": 2,
         "exclusions": {
             "too_short": 0,
             "no_outcome_followup": 0,
+            "incomplete_horizon_followup": 0,
             "positive_in_lookback": 0,
         },
     }
@@ -64,6 +82,11 @@ def test_cli_run_ingests_psv_and_writes_cohort_and_model_artifacts(tmp_path, mon
     assert (output_dir / "model_comparison.csv").is_file()
     assert (output_dir / "model_curves.png").is_file()
     report = (output_dir / "report.html").read_text(encoding="utf-8")
+    assert "Synthetic smoke test" in report
+    assert "Methodology" in report
+    assert "validation patients" in report
+    assert (output_dir / "model_evaluation.json").is_file()
+    assert (output_dir / "model_ranking.csv").is_file()
     assert "Model results" in report
     assert "Pipeline and data lineage" in report
     assert "Sample of source observations" in report

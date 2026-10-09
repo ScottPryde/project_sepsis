@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
@@ -22,22 +23,46 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from sklearn.model_selection import GroupShuffleSplit
+from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestClassifier
+
+from sepsis_prediction.features import DEFAULT_HORIZON_HOURS
 
 
 DESIGN = {
     "lookback_rows": 6,
     "lookback_hours": "hours 0-5 inclusive",
-    "prediction_period": "any SepsisLabel=1 from hour 6 onward",
+    "prediction_period": "any SepsisLabel=1 within the configured horizon after hour 5",
+    "label_definition": "SepsisLabel switches on six hours before Sepsis-3 onset (PhysioNet 2019)",
     "exclude_positive_in_lookback": True,
     "exclude_records_shorter_than_rows": 6,
     "minimum_rows_for_observed_outcome": 7,
     "predictor_rows": "only rows 0-5",
     "excluded_predictors": ["SepsisLabel", "patient_id", "ICULOS"],
     "split_unit": "patient",
+}
+
+MODEL_SPECS = {
+    "logistic_regression": {
+        "input": "engineered tabular features",
+        "preprocessing": ["median imputation (fit-patient fitted)", "standardisation (fit-patient fitted)"],
+        "estimator": "L2 logistic regression, max_iter=2000",
+        "class_weighting": "none",
+    },
+    "random_forest": {
+        "input": "engineered tabular features",
+        "preprocessing": ["median imputation (fit-patient fitted)"],
+        "estimator": "300 trees, default depth",
+        "class_weighting": "none",
+    },
+    "xgboost": {
+        "input": "engineered tabular features",
+        "preprocessing": ["median imputation (fit-patient fitted)"],
+        "estimator": "300 boosted trees, max_depth=4, learning_rate=0.05, subsample=0.8, colsample_bytree=0.8",
+        "class_weighting": "none",
+    },
 }
 
 
@@ -48,16 +73,13 @@ def make_pipeline(model_name: str, feature_names: list[str], random_state: int) 
             ("imputer", SimpleImputer(strategy="median", keep_empty_features=True)),
             ("scaler", StandardScaler()),
         ])
-        estimator = LogisticRegression(
-            class_weight="balanced", max_iter=2000, random_state=random_state,
-        )
+        estimator = LogisticRegression(max_iter=2000, random_state=random_state)
     elif model_name == "random_forest":
         numeric_pipeline = Pipeline([
             ("imputer", SimpleImputer(strategy="median", keep_empty_features=True)),
         ])
         estimator = RandomForestClassifier(
             n_estimators=300,
-            class_weight="balanced_subsample",
             n_jobs=1,
             random_state=random_state,
         )
@@ -66,7 +88,7 @@ def make_pipeline(model_name: str, feature_names: list[str], random_state: int) 
             from xgboost import XGBClassifier
         except ImportError as error:
             raise ImportError(
-                "XGBoost dependency is unavailable; reinstall the project with `python -m pip install -e .`"
+                "XGBoost is optional; install it with `python -m pip install -e '.[xgboost]'`"
             ) from error
         numeric_pipeline = Pipeline([
             ("imputer", SimpleImputer(strategy="median", keep_empty_features=True)),
@@ -119,6 +141,30 @@ def _write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")
 
 
+def _package_versions() -> dict[str, str | None]:
+    packages = ("numpy", "pandas", "scikit-learn", "matplotlib", "joblib", "xgboost", "torch")
+    versions: dict[str, str | None] = {}
+    for package in packages:
+        try:
+            versions[package] = version(package)
+        except PackageNotFoundError:
+            versions[package] = None
+    return versions
+
+
+def _threshold_at_sensitivity(y_true: np.ndarray, probabilities: np.ndarray, target: float) -> float:
+    if not 0 < target <= 1:
+        raise ValueError("target_sensitivity must be in (0, 1]")
+    positives = int(y_true.sum())
+    if positives == 0 or np.unique(y_true).size < 2:
+        raise ValueError("Validation patients must contain both outcome classes")
+    for candidate in np.sort(np.unique(probabilities))[::-1]:
+        sensitivity = int(((probabilities >= candidate) & (y_true == 1)).sum()) / positives
+        if sensitivity >= target:
+            return float(candidate)
+    return 0.0
+
+
 def run_experiment(
     features: pd.DataFrame,
     labels: pd.Series,
@@ -128,11 +174,18 @@ def run_experiment(
     models: tuple[str, ...] = ("logistic_regression", "random_forest"),
     test_size: float = 0.2,
     random_state: int = 42,
-    threshold: float = 0.5,
+    threshold: float | None = None,
+    horizon_hours: int = DEFAULT_HORIZON_HOURS,
+    validation_size: float = 0.2,
+    target_sensitivity: float = 0.8,
 ) -> dict[str, dict[str, Any]]:
     """Split patients, fit selected baselines, and write artifacts."""
     if not 0 < test_size < 1:
         raise ValueError("test_size must be between 0 and 1")
+    if not 0 < validation_size < 1:
+        raise ValueError("validation_size must be between 0 and 1")
+    if horizon_hours < 1:
+        raise ValueError("horizon_hours must be a positive integer")
     supported_models = {"logistic_regression", "random_forest", "xgboost"}
     if not models:
         raise ValueError("At least one model must be selected")
@@ -145,38 +198,67 @@ def run_experiment(
         raise ValueError("No feature rows or feature columns were provided")
     if not features.index.equals(labels.index) or not features.index.equals(groups.index):
         raise ValueError("features, labels, and groups must have matching indexes")
+    if groups.astype(str).duplicated().any():
+        raise ValueError("Expected exactly one cohort row per patient for stratified splitting")
     if labels.nunique() != 2:
         raise ValueError("Training cohort must contain both outcome classes")
 
-    splitter = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=random_state)
-    train_positions, test_positions = next(splitter.split(features, labels, groups))
-    train_groups = set(groups.iloc[train_positions].astype(str))
+    test_splitter = StratifiedShuffleSplit(n_splits=1, test_size=test_size, random_state=random_state)
+    train_validation_positions, test_positions = next(test_splitter.split(features, labels))
+    validation_splitter = StratifiedShuffleSplit(
+        n_splits=1, test_size=validation_size, random_state=random_state + 1,
+    )
+    fit_relative, validation_relative = next(validation_splitter.split(
+        features.iloc[train_validation_positions], labels.iloc[train_validation_positions],
+    ))
+    fit_positions = train_validation_positions[fit_relative]
+    validation_positions = train_validation_positions[validation_relative]
+    train_positions = np.concatenate([fit_positions, validation_positions])
+    fit_groups = set(groups.iloc[fit_positions].astype(str))
+    validation_groups = set(groups.iloc[validation_positions].astype(str))
     test_groups = set(groups.iloc[test_positions].astype(str))
-    if train_groups & test_groups:
-        raise RuntimeError("Patient group overlap found between train and test")
-    if labels.iloc[train_positions].nunique() != 2:
-        raise ValueError("Training split contains only one outcome class; adjust test_size or seed")
+    if fit_groups & validation_groups or fit_groups & test_groups or validation_groups & test_groups:
+        raise RuntimeError("Patient group overlap found between fit, validation, and test")
+    for name, positions in (("fit", fit_positions), ("validation", validation_positions), ("test", test_positions)):
+        if labels.iloc[positions].nunique() != 2:
+            raise ValueError(f"{name.title()} split contains one outcome class; adjust split sizes or seed")
 
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     feature_names = list(features.columns)
-    y_train = labels.iloc[train_positions].to_numpy(dtype=int)
+    y_fit = labels.iloc[fit_positions].to_numpy(dtype=int)
+    y_validation = labels.iloc[validation_positions].to_numpy(dtype=int)
     y_test = labels.iloc[test_positions].to_numpy(dtype=int)
+    validation_features = features.iloc[validation_positions]
     test_features = features.iloc[test_positions]
     metrics: dict[str, dict[str, Any]] = {}
+    thresholds: dict[str, float] = {}
     importance_rows: list[dict[str, Any]] = []
     predictions = pd.DataFrame({
         "patient_id": groups.iloc[test_positions].astype(str).to_numpy(),
         "y_true": y_test,
     })
+    validation_predictions = pd.DataFrame({
+        "patient_id": groups.iloc[validation_positions].astype(str).to_numpy(),
+        "y_true": y_validation,
+    })
 
     for model_name in models:
         model = make_pipeline(model_name, feature_names, random_state)
-        model.fit(features.iloc[train_positions], y_train)
+        model.fit(features.iloc[fit_positions], y_fit)
+        validation_probabilities = model.predict_proba(validation_features)[:, 1]
         probabilities = model.predict_proba(test_features)[:, 1]
-        metrics[model_name] = calculate_metrics(y_test, probabilities, threshold)
+        selected_threshold = threshold if threshold is not None else _threshold_at_sensitivity(
+            y_validation, validation_probabilities, target_sensitivity,
+        )
+        thresholds[model_name] = float(selected_threshold)
+        metrics[model_name] = calculate_metrics(y_test, probabilities, selected_threshold)
+        validation_predictions[f"{model_name}_probability"] = validation_probabilities
+        validation_predictions[f"{model_name}_prediction"] = (
+            validation_probabilities >= selected_threshold
+        ).astype(int)
         predictions[f"{model_name}_probability"] = probabilities
-        predictions[f"{model_name}_prediction"] = (probabilities >= threshold).astype(int)
+        predictions[f"{model_name}_prediction"] = (probabilities >= selected_threshold).astype(int)
         classifier = model.named_steps["classifier"]
         if hasattr(classifier, "coef_"):
             values = classifier.coef_[0]
@@ -194,6 +276,7 @@ def run_experiment(
         joblib.dump(model, output / f"{model_name}.joblib")
 
     predictions.to_csv(output / "test_predictions.csv", index=False, float_format="%.12g")
+    validation_predictions.to_csv(output / "validation_predictions.csv", index=False, float_format="%.12g")
     pd.DataFrame(importance_rows).sort_values(
         ["model", "absolute_value"], ascending=[True, False], ignore_index=True,
     ).to_csv(output / "feature_importance.csv", index=False, float_format="%.12g")
@@ -201,16 +284,29 @@ def run_experiment(
     _write_json(output / "feature_names.json", feature_names)
     _write_json(output / "split_patients.json", {
         "train": groups.iloc[train_positions].astype(str).tolist(),
+        "fit": groups.iloc[fit_positions].astype(str).tolist(),
+        "validation": groups.iloc[validation_positions].astype(str).tolist(),
         "test": groups.iloc[test_positions].astype(str).tolist(),
     })
     _write_json(output / "run_config.json", {
-        "design": DESIGN,
+        "design": {**DESIGN, "horizon_hours": horizon_hours},
         "models": list(models),
+        "model_specs": {name: MODEL_SPECS[name] for name in models},
         "random_state": random_state,
         "test_size": test_size,
-        "threshold": threshold,
+        "validation_size": validation_size,
+        "threshold_selection": (
+            "fixed user override" if threshold is not None
+            else "validation threshold at target sensitivity"
+        ),
+        "target_sensitivity": target_sensitivity,
+        "threshold_override": threshold,
+        "model_thresholds": thresholds,
+        "package_versions": _package_versions(),
         "n_patients": int(len(features)),
         "n_train": int(len(train_positions)),
+        "n_fit": int(len(fit_positions)),
+        "n_validation": int(len(validation_positions)),
         "n_test": int(len(test_positions)),
     })
     return metrics

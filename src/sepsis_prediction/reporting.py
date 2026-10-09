@@ -16,6 +16,7 @@ import pandas as pd
 from sklearn.metrics import precision_recall_curve, roc_curve
 
 from sepsis_prediction.data import TARGET_COLUMN, PatientRecord
+from sepsis_prediction.evaluation import compare_models
 
 
 def write_model_comparison(output_dir: str | Path) -> pd.DataFrame:
@@ -67,6 +68,7 @@ def write_model_comparison(output_dir: str | Path) -> pd.DataFrame:
     figure.tight_layout()
     figure.savefig(output / "model_curves.png", dpi=160)
     plt.close(figure)
+    compare_models(output)
     return table
 
 
@@ -101,6 +103,14 @@ def write_html_report(
     feature_html = _render_feature_sample(features)
     charts_html = _render_charts(output, metrics)
     diagrams_html = _render_diagrams(config)
+    evaluation = _read_json(output / "model_evaluation.json", {})
+    methodology_html = _render_methodology(config, cohort, features)
+    effective_html = _render_effective(evaluation)
+    synthetic_notice = (
+        '<div class="notice"><strong>Synthetic smoke test.</strong> This report uses fabricated data '
+        'and demonstrates workflow execution only; its metrics are not evidence of clinical performance.</div>'
+        if config.get("synthetic_demo") else ""
+    )
     generated_at = pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%d %H:%M UTC")
 
     document = f"""<!doctype html>
@@ -124,6 +134,8 @@ section {{ padding:22px 0 26px; border-top:1px solid var(--line); }} h2 {{ margi
 .panel {{ min-width:0; padding:16px; background:var(--white); border:1px solid var(--line); }} .panel img {{ display:block; width:100%; height:auto; }}
 .table-wrap {{ width:100%; overflow-x:auto; border:1px solid var(--line); background:var(--white); }} table {{ width:100%; border-collapse:collapse; font-size:13px; white-space:nowrap; }} th,td {{ padding:9px 11px; text-align:left; border-bottom:1px solid #e6eae7; }} th {{ position:sticky; top:0; color:#35504d; background:#edf2ee; font-weight:700; }} tbody tr:nth-child(even) {{ background:#f8faf8; }}
 .diagram {{ overflow-x:auto; padding:12px; background:#fff; border:1px solid var(--line); }} svg {{ display:block; max-width:100%; height:auto; }} .diagram-label {{ color:var(--muted); font-size:13px; margin:0 0 8px; }}
+.muted {{ color:var(--muted); font-size:12px; }} .prose {{ max-width:82ch; }} .prose p {{ margin:0 0 10px; }} .verdict {{ padding:14px 16px; margin:12px 0; background:#fff; border-left:4px solid var(--teal); }} .caution {{ color:#8f3b32; }}
+.rank-table td:last-child {{ white-space:normal; min-width:180px; }} details.detail {{ margin:18px 0; padding:12px 16px; background:#fff; border:1px solid var(--line); }} details.detail summary {{ cursor:pointer; font-weight:700; }}
 .empty {{ color:var(--muted); padding:12px 0; }} .footer {{ border-top:1px solid var(--line); padding:18px 0; color:var(--muted); font-size:12px; }}
 @media(max-width:600px) {{ main {{ padding:18px; }} .masthead {{ padding:22px 18px; }} h1 {{ font-size:30px; }} .panel {{ padding:12px; }} th,td {{ padding:8px; }} }}
 @media print {{ body {{ background:white; }} .masthead {{ print-color-adjust:exact; }} section {{ break-inside:avoid; }} }}
@@ -133,8 +145,10 @@ section {{ padding:22px 0 26px; border-top:1px solid var(--line); }} h2 {{ margi
 <header class="masthead"><div class="eyebrow">PhysioNet 2019 · Applied ML study</div><h1>{html.escape(title)}</h1><p>Patient-level early-prediction experiment · six-hour look-back · generated {generated_at}</p></header>
 <main>
 <div class="notice"><strong>Research use only.</strong> Retrospective modelling results are not clinically validated. This report may contain patient-derived clinical values; handle and share it according to the dataset terms and your institution's privacy requirements.</div>
+{synthetic_notice}
 {cohort_html}
-<section><h2>Model results</h2>{metrics_html}<div class="chart-grid">{charts_html}</div>{comparison_html}</section>
+{methodology_html}
+<section><h2>Model results</h2>{effective_html}<details class="detail"><summary>Additional model metrics</summary>{metrics_html}{comparison_html}</details><div class="chart-grid">{charts_html}</div></section>
 <section><h2>Pipeline and data lineage</h2>{diagrams_html}</section>
 <section><h2>Sample of source observations</h2><p class="diagram-label">First six rows only, matching the model input window; identifiers are replaced with report-local labels.</p>{sample_html}</section>
 <section><h2>Sample engineered inputs</h2><p class="diagram-label">Descriptive feature values from the same fixed look-back, where available.</p>{feature_html}</section>
@@ -214,6 +228,9 @@ def _render_charts(output: Path, metrics: dict[str, dict[str, Any]]) -> str:
         encoded = base64.b64encode(curve_path.read_bytes()).decode("ascii")
         sections.append(f'<div class="panel"><h3>Discrimination curves</h3><img alt="ROC and precision-recall curves" src="data:image/png;base64,{encoded}"></div>')
     for filename, heading, alt in (
+        ("model_forest.png", "Discrimination with uncertainty", "AUPRC and AUROC confidence intervals"),
+        ("calibration.png", "Calibration", "Calibration curves by model"),
+        ("decision_curve.png", "Decision curve", "Net benefit by model and alert threshold"),
         ("missingness.png", "Missingness by variable", "Clinical variable missingness chart"),
         ("record_lengths.png", "Patient record lengths", "Patient record length histogram"),
         ("labels_by_hour.png", "Label prevalence by hour", "Sepsis label fraction by hour index"),
@@ -239,6 +256,98 @@ def _render_charts(output: Path, metrics: dict[str, dict[str, Any]]) -> str:
     return '<style>.metric-header,.metric-row{display:grid;grid-template-columns:130px repeat(5,minmax(62px,1fr));gap:8px;align-items:center;margin:9px 0;font-size:11px}.metric-header{color:#52605f;text-transform:capitalize}.metric-row strong{font-size:12px}.bar-track{height:10px;background:#e9eeeb;border-radius:2px;overflow:hidden}.bar-track span{display:block;height:100%;border-radius:2px}</style>' + "".join(sections)
 
 
+def _render_methodology(
+    config: dict[str, Any],
+    cohort: dict[str, Any],
+    features: pd.DataFrame | None,
+) -> str:
+    if not config:
+        return ""
+    design = config.get("design", {})
+    horizon = design.get("horizon_hours", cohort.get("horizon_hours", 24))
+    specs = config.get("model_specs", {})
+    model_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(name.replace('_', ' ').title())}</td>"
+        f"<td>{html.escape(spec.get('input', '—'))}</td>"
+        f"<td>{html.escape('; '.join(spec.get('preprocessing', [])))}</td>"
+        f"<td>{html.escape(spec.get('estimator', '—'))}</td>"
+        f"<td>{html.escape(spec.get('class_weighting', '—'))}</td></tr>"
+        for name, spec in specs.items()
+    )
+    fit_count = config.get("n_fit", "—")
+    validation_count = config.get("n_validation", "—")
+    test_count = config.get("n_test", "—")
+    feature_count = features.shape[1] if features is not None else "—"
+    threshold_selection = config.get("threshold_selection", "validation threshold at target sensitivity")
+    label_definition = design.get("label_definition", "PhysioNet label timing is documented in the project design")
+    return f'''<section><h2>Methodology</h2><div class="prose">
+<p>Each patient contributes one prediction from rows 0–5. The outcome is any positive SepsisLabel in rows 6–{5 + int(horizon)} inclusive, a {int(horizon)}-hour label horizon. Negative patients without complete follow-up through that window are excluded; positives observed inside it are retained.</p>
+<p>{html.escape(str(label_definition))}. Because the label leads Sepsis-3 onset by six hours, this horizon describes label timing rather than a direct onset timestamp.</p>
+<p>Tabular input has {feature_count} engineered features. Patient-level stratified partitions are fit ({fit_count}), validation ({validation_count}), and test ({test_count}). All learned preprocessing is fit on fit patients only. Threshold policy: {html.escape(str(threshold_selection))}. Class weighting is disabled across model families.</p>
+</div><h3>Model specifications</h3><div class="table-wrap"><table><thead><tr><th>Model</th><th>Input</th><th>Preprocessing</th><th>Estimator</th><th>Class weighting</th></tr></thead><tbody>{model_rows}</tbody></table></div>
+<p class="diagram-label">Retrospective single-dataset evaluation only; not validated for clinical use.</p></section>'''
+
+
+def _render_effective(evaluation: dict[str, Any]) -> str:
+    rows = evaluation.get("models", [])
+    if not rows:
+        return '<p class="empty">Run training to generate the held-out comparison.</p>'
+    def show(value: Any) -> str:
+        if value is None:
+            return "—"
+        try:
+            return f"{float(value):.3f}"
+        except (TypeError, ValueError):
+            return "—"
+
+    def show_ci(value: Any, interval: list[Any]) -> str:
+        if value is None:
+            return "—"
+        if interval[0] is None or interval[1] is None:
+            return show(value)
+        return f"{show(value)} ({show(interval[0])}–{show(interval[1])})"
+
+    header = ("<tr><th>Rank</th><th>Model</th><th>AUPRC (95% CI)</th><th>AUROC (95% CI)</th>"
+              "<th>Sensitivity</th><th>Specificity</th><th>PPV</th><th>Alerts / 100</th>"
+              "<th>Brier</th><th>Calibration slope</th><th>Comparison with top</th></tr>")
+    body = []
+    for row in rows:
+        operating = row["operating_point"]
+        calibration = row["calibration"]
+        difference = row.get("vs_top")
+        comparison = "Top ranked" if difference is None else (
+            f"AUPRC difference {show(difference['auprc_difference'])}; 95% CI "
+            f"{show(difference['auprc_difference_ci'][0])}–{show(difference['auprc_difference_ci'][1])}"
+        )
+        body.append(
+            f"<tr><td>{row['rank']}</td><td>{html.escape(row['model'].replace('_', ' ').title())}</td>"
+            f"<td>{show_ci(row['auprc'], row['auprc_ci'])}</td>"
+            f"<td>{show_ci(row['auroc'], row['auroc_ci'])}</td>"
+            f"<td>{show(operating['sensitivity'])}</td><td>{show(operating['specificity'])}</td>"
+            f"<td>{show(operating['ppv'])}</td><td>{show(operating['alerts_per_100'])}</td>"
+            f"<td>{show(calibration['brier'])}</td><td>{show(calibration['calibration_slope'])}</td>"
+            f"<td>{html.escape(comparison)}</td></tr>"
+        )
+    caution = (
+        f'<p class="caution">Only {evaluation.get("positives", 0)} positive test patients; '
+        "intervals and rankings may be unstable.</p>"
+        if int(evaluation.get("positives", 0)) < 30 else ""
+    )
+    threshold_source = str(evaluation.get("threshold_source", "validation patients"))
+    threshold_sentence = (
+        "Thresholds were selected on validation patients and applied unchanged to test patients."
+        if threshold_source.startswith("validation")
+        else "Operating points use the fixed user-provided threshold on test patients."
+    )
+    return (f'<div class="verdict"><strong>Ranked by AUPRC</strong>, with AUROC as a tie-break. '
+            f'{threshold_sentence} '
+            f'Uncertainty uses {evaluation.get("n_bootstrap", 0)} paired bootstrap resamples of the same test patients.</div>'
+            f'<div class="table-wrap"><table class="rank-table"><thead>{header}</thead><tbody>{"".join(body)}</tbody></table></div>'
+            '<p class="diagram-label">Intervals describe sampling uncertainty on this test set. An interval that includes zero means the observed difference is not clearly separated; it does not establish model equivalence.</p>'
+            + caution)
+
+
 def _color_for_metric(metric: str) -> str:
     colors = {"auroc": "#167b73", "auprc_average_precision": "#477d9e", "sensitivity_recall": "#c45042", "specificity": "#d89a38", "f1": "#745d92"}
     return colors[metric]
@@ -246,14 +355,71 @@ def _color_for_metric(metric: str) -> str:
 
 def _render_diagrams(config: dict[str, Any]) -> str:
     design = config.get("design", {})
-    models = config.get("models", ["Logistic Regression", "Random Forest", "XGBoost"])
-    if "cnn_1d" in models:
-        model_label = "Tabular models + 1D CNN"
-    else:
-        model_label = " / ".join(str(model).replace("_", " ").title() for model in models)
-    pipeline = f'''<div class="diagram"><p class="diagram-label">Model pipeline · train-only transforms applied after patient-level split</p><svg viewBox="0 0 1040 180" role="img" aria-label="Model pipeline diagram"><defs><marker id="arrow" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#536966"/></marker></defs><g font-family="Segoe UI, sans-serif" font-size="14" text-anchor="middle"><g fill="#e6f1ed" stroke="#167b73" stroke-width="2"><rect x="14" y="48" width="145" height="76" rx="5"/><rect x="198" y="48" width="145" height="76" rx="5"/><rect x="382" y="48" width="145" height="76" rx="5"/><rect x="566" y="48" width="145" height="76" rx="5"/><rect x="750" y="48" width="145" height="76" rx="5"/></g><g fill="#1c2727"><text x="86" y="78"><tspan>Patient PSV</tspan><tspan x="86" dy="20">hourly records</tspan></text><text x="270" y="78"><tspan>Rows 0–5</tspan><tspan x="270" dy="20">fixed look-back</tspan></text><text x="454" y="78"><tspan>Patient-level</tspan><tspan x="454" dy="20">train/test split</tspan></text><text x="638" y="78"><tspan>Train-only</tspan><tspan x="638" dy="20">imputation/scale</tspan></text><text x="822" y="78"><tspan>Fit models</tspan><tspan x="822" dy="20">and score</tspan></text></g><path d="M160 86 H190 M344 86 H374 M528 86 H558 M712 86 H742" fill="none" stroke="#536966" stroke-width="2" marker-end="url(#arrow)"/><text x="966" y="75" fill="#1c2727">Held-out</text><text x="966" y="96" fill="#1c2727">metrics</text><path d="M896 86 H932" fill="none" stroke="#536966" stroke-width="2" marker-end="url(#arrow)"/><text x="520" y="158" fill="#52605f">{html.escape(model_label)} · six-hour input, post-hour-5 outcome</text></g></svg></div>'''
+    selected = set(config.get("models", []))
+    specs = config.get("model_specs", {})
+    available = ("logistic_regression", "random_forest", "xgboost", "cnn_1d")
+    colors = {"logistic_regression": "#167b73", "random_forest": "#477d9e",
+              "xgboost": "#d89a38", "cnn_1d": "#c45042"}
+    names = {name: name.replace("_", " ").title() for name in available}
+    headings = (("Input", 84), ("Representation", 254), ("Train-only transforms", 424),
+                ("Estimator", 594), ("Validation threshold", 764), ("Test evaluation", 934))
+    lane_parts = [
+        '<defs><marker id="lane-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">'
+        '<path d="M0,0 L8,4 L0,8 z" fill="#536966"/></marker></defs>',
+        '<g font-family="Segoe UI, sans-serif" text-anchor="middle">',
+        '<rect x="18" y="8" width="964" height="32" rx="4" fill="#eef2ed" stroke="#8b9a91"/>',
+        '<text x="500" y="29" font-size="13" fill="#1c2727">Shared cohort: six-hour look-back · '
+        f'{int(design.get("horizon_hours", 24))}-hour outcome horizon · stratified patient split</text>',
+    ]
+    for label, x in headings:
+        lane_parts.append(f'<text x="{x}" y="58" font-size="11" fill="#52605f">{html.escape(label)}</text>')
+    for index, name in enumerate(available):
+        y = 72 + index * 66
+        active = name in selected
+        stroke = colors[name] if active else "#a9b3b0"
+        fill = "#ffffff" if active else "#f5f6f4"
+        dash = "" if active else ' stroke-dasharray="5 4"'
+        spec = specs.get(name, {})
+        if name == "cnn_1d":
+            representation = "Ordered values + masks"
+            preprocessing = "Median impute + z-score"
+            estimator = "1D CNN, early stop"
+        else:
+            representation = "Engineered summaries"
+            preprocessing = "; ".join(spec.get("preprocessing", ["Median imputation"]))
+            preprocessing = preprocessing.replace(" (fit-patient fitted)", "")
+            estimator = spec.get("estimator", names[name])
+            if len(estimator) > 24:
+                estimator = names[name]
+        boxes = (
+            (18, 132, "Rows 0–5"),
+            (188, 132, representation),
+            (358, 132, preprocessing),
+            (528, 132, estimator),
+            (698, 132, "Threshold from validation"),
+            (868, 114, "Frozen threshold; held-out metrics"),
+        )
+        for x, width, text in boxes:
+            lane_parts.append(f'<rect x="{x}" y="{y}" width="{width}" height="42" rx="4" '
+                              f'fill="{fill}" stroke="{stroke}"{dash}/>')
+            if x == 18:
+                lane_parts.append(f'<text x="{x + width / 2}" y="{y + 17}" font-size="9" '
+                                  f'font-weight="700" fill="{stroke}">{html.escape(names[name])}'
+                                  f'<tspan x="{x + width / 2}" dy="13" font-weight="400" fill="#1c2727">'
+                                  f'{html.escape(text)}</tspan></text>')
+            else:
+                lane_parts.append(f'<text x="{x + width / 2}" y="{y + 25}" font-size="10" fill="#1c2727">'
+                                  f'{html.escape(text)}</text>')
+        for x in (150, 320, 490, 660, 830):
+            lane_parts.append(f'<path d="M{x} {y + 21} H{x + 30}" fill="none" stroke="#536966" '
+                              'stroke-width="1.5" marker-end="url(#lane-arrow)"/>')
+    lane_parts.append('</g>')
+    pipeline_height = 72 + len(available) * 66
+    pipeline = (f'<div class="diagram"><p class="diagram-label">Per-model pipeline; solid lanes ran, dashed lanes were not selected</p>'
+                f'<svg viewBox="0 0 1000 {pipeline_height}" role="img" aria-label="Per-model pipeline lanes">'
+                f'{"".join(lane_parts)}</svg></div>')
     lineage = '''<div class="diagram"><p class="diagram-label">Data lineage · predictors and target come from disjoint time ranges</p><svg viewBox="0 0 1040 190" role="img" aria-label="Data lineage diagram"><defs><marker id="arrow2" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#536966"/></marker></defs><g font-family="Segoe UI, sans-serif" font-size="13" text-anchor="middle"><rect x="24" y="48" width="190" height="78" rx="5" fill="#eef2ed" stroke="#8b9a91"/><text x="119" y="78" fill="#1c2727"><tspan>Raw patient file</tspan><tspan x="119" dy="20">values + labels</tspan></text><rect x="300" y="24" width="235" height="66" rx="5" fill="#e4f1ed" stroke="#167b73" stroke-width="2"/><text x="417" y="51" fill="#1c2727"><tspan>Rows 0–5</tspan><tspan x="417" dy="19">clinical inputs only</tspan></text><rect x="300" y="108" width="235" height="58" rx="5" fill="#fbebe7" stroke="#c45042" stroke-width="2"/><text x="417" y="132" fill="#1c2727"><tspan>Row 6 onward</tspan><tspan x="417" dy="18">outcome labels only</tspan></text><rect x="642" y="48" width="174" height="78" rx="5" fill="#fff0d9" stroke="#d89a38" stroke-width="2"/><text x="729" y="78" fill="#1c2727"><tspan>Join by patient</tspan><tspan x="729" dy="20">after eligibility</tspan></text><rect x="880" y="48" width="142" height="78" rx="5" fill="#e9e6f0" stroke="#745d92" stroke-width="2"/><text x="951" y="78" fill="#1c2727"><tspan>Saved test</tspan><tspan x="951" dy="20">predictions</tspan></text><path d="M215 86 H290 M535 56 C580 56 590 70 632 80 M535 137 C580 137 590 105 632 94 M817 86 H870" fill="none" stroke="#536966" stroke-width="2" marker-end="url(#arrow2)"/><text x="520" y="184" fill="#52605f">Patient ID is lineage metadata, never an input feature · SepsisLabel is target-only</text></g></svg></div>'''
-    metadata = f'<p class="diagram-label">Recorded design: {html.escape(str(design.get("lookback_hours", "six-hour look-back")))}; outcome: {html.escape(str(design.get("prediction_period", "post-look-back label")))}; split unit: {html.escape(str(design.get("split_unit", "patient")))}.</p>'
+    metadata = f'<p class="diagram-label">Recorded design: {html.escape(str(design.get("lookback_hours", "six-hour look-back")))}; outcome: {html.escape(str(design.get("prediction_period", "bounded post-look-back label")))}; split unit: {html.escape(str(design.get("split_unit", "patient")))}.</p>'
     return pipeline + lineage + metadata
 
 

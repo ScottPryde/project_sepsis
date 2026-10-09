@@ -44,6 +44,13 @@ def validate_patient_frame(frame: pd.DataFrame, source: str = "<memory>") -> lis
     elif not labels.isin((0, 1)).all():
         errors.append(f"{source}: {TARGET_COLUMN} must contain only 0 and 1")
 
+    if "ICULOS" in frame.columns:
+        iculos = pd.to_numeric(frame["ICULOS"], errors="coerce")
+        if iculos.isna().any():
+            errors.append(f"{source}: ICULOS must contain numeric hourly indices when present")
+        elif len(iculos) > 1 and not (iculos.diff().iloc[1:] == 1).all():
+            errors.append(f"{source}: ICULOS must increase by exactly one per row")
+
     for column in KNOWN_CLINICAL_COLUMNS:
         if column in frame.columns:
             values = pd.to_numeric(frame[column], errors="coerce")

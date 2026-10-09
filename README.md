@@ -4,13 +4,13 @@ A reproducible workflow for dataset inspection, early-window cohort construction
 
 ## Prediction Design
 
-Each PSV file represents one patient, with hourly observations in file order. The project uses rows at hours 0-5 inclusive as a fixed six-hour look-back and predicts whether any `SepsisLabel=1` occurs from hour 6 onward. Patients labeled positive in any of rows 0-5 are excluded, as are records shorter than six rows and records with no post-look-back observation. At least seven rows are therefore required to observe an outcome label.
+Each PSV file represents one patient, with hourly observations in file order. The project uses rows at hours 0-5 inclusive as a fixed six-hour look-back and predicts whether any `SepsisLabel=1` occurs in the next 24 hours by default (rows 6-29). In PhysioNet 2019, `SepsisLabel` switches on six hours before Sepsis-3 onset, so the outcome is the dataset's early label, not a direct onset-time estimate. Patients labeled positive in any of rows 0-5 are excluded. Positive patients observed within the horizon are retained even if the record ends early; negative patients must have complete horizon follow-up. Set another horizon with `--horizon-hours`.
 
-Features use only those six look-back rows. For each known clinical input, deterministic features include latest observed value, mean, minimum, maximum, population standard deviation, first-to-last observed delta, missing fraction, and an any-missing indicator. Missing schema columns and all-NaN windows retain a stable feature schema and are handled by the train-fitted imputer. `SepsisLabel`, the filename-derived patient identifier, and `ICULOS` are never predictors. `ICULOS` is deliberately excluded: the fixed six-row design already establishes the observation period, and elapsed ICU time could otherwise encode care-process timing.
+Features use only those six look-back rows. Dynamic inputs receive latest value, mean, minimum, maximum, population standard deviation, first-to-last observed delta, missing fraction, and an any-missing indicator. Static inputs (`Age`, `Gender`, `Unit1`, `Unit2`, `HospAdmTime`) receive only latest value and missingness indicators. Missing schema columns and all-NaN windows retain a stable feature schema and are handled by the fit-patient imputer. `SepsisLabel`, the filename-derived patient identifier, and `ICULOS` are never predictors. `ICULOS`, when present, is checked for one-hour increments but excluded as a predictor.
 
-The cohort is split by patient before model fitting. Every learned imputation and scaling step is fitted on training patients only. Logistic Regression, Random Forest, and XGBoost use the same feature rows and patient split. CNN training is opt-in and uses the corresponding ordered six-hour observations and the same deterministic split; its variable-wise imputation and scaling are fitted on training patients only. The default probability threshold is 0.5; the threshold, seed, cohort design, metrics, and patient split are saved with the run.
+Patients are stratified into fit, validation, and test partitions before model fitting. Every learned preprocessing step is fitted on fit patients only. Thresholds are selected on validation patients and frozen before test evaluation; the target sensitivity defaults to 80%. Logistic Regression, Random Forest, and XGBoost use the same feature rows and split. CNN training is opt-in, uses the same patient partitions and missingness-mask channels, and early-stops using validation loss.
 
-PyTorch and XGBoost are installed with the standard project dependencies. The tabular workflow remains the default; select XGBoost with `--models` and use `--cnn` to add sequence-model training.
+The tabular workflow remains the default. Install the optional XGBoost or PyTorch extra only when selecting those models.
 
 ## Install
 
@@ -22,11 +22,13 @@ python -m venv .venv
 python -m pip install -e ".[dev]"
 ```
 
+Install the optional model libraries only when needed: `python -m pip install -e ".[xgboost]"` for XGBoost and `python -m pip install -e ".[cnn]"` for the CNN.
+
 ## Data Setup
 
 Obtain the PhysioNet Challenge 2019 dataset from <https://physionet.org/content/challenge-2019/1.0.0/> and follow its access and usage terms. Point the commands at a directory containing `.psv` files, one patient per file. Keep downloaded data outside version control; `data/` and common output directories are ignored.
 
-The validator requires a `SepsisLabel` column containing numeric 0/1 values. Missing clinical input columns are allowed and become all-missing features; present clinical values must be numeric. Input files are processed in sorted filename order for deterministic cohort construction.
+The validator requires a `SepsisLabel` column containing numeric 0/1 values. Missing clinical input columns are allowed and become all-missing features; present clinical values must be numeric. If present, `ICULOS` must increase by one per row. Input files are processed in sorted filename order for deterministic cohort construction. `validate` prints counts by default; add `--verbose` to list patient filenames.
 
 ## Run
 
@@ -48,26 +50,29 @@ Build the early-prediction cohort, train both tabular baselines, evaluate held-o
 sepsis-pipeline run --data-dir .\data\train --output-dir .\artifacts --random-state 42 --test-size 0.2
 ```
 
+The outcome horizon defaults to 24 hours. For a different endpoint, pass `--horizon-hours 12` or `--horizon-hours 48`. By default, each model's threshold is selected on validation patients to reach 80% sensitivity; `--validation-size` and `--target-sensitivity` adjust that procedure. `--threshold` explicitly overrides it with a common fixed threshold.
+
 To run the whole workflow without downloading the clinical dataset, use the fabricated synthetic demo:
 
 ```powershell
 python .\scripts\run_synthetic_demo.py
 ```
 
-It runs validation, EDA, all tabular models, one CNN epoch, and checks the report at `outputs/synthetic_e2e/run/report.html`. Its generated labels and measurements are not clinical data or evidence.
+Install `python -m pip install -e ".[dev,cnn,xgboost]"` before running the demo. It runs validation, EDA, all tabular models, one CNN epoch, and checks the report at `outputs/synthetic_e2e/run/report.html`. Its generated labels and measurements are not clinical data or evidence.
 
-Choose models with `--models logistic_regression random_forest xgboost`. Add `--cnn --cnn-epochs 20` to train the PyTorch CNN. Run `python -m sepsis_prediction.cli` in place of the installed command when working from a source checkout.
+Choose models with `--models logistic_regression random_forest xgboost`. Add `--cnn --cnn-epochs 20` to train the PyTorch CNN. The CNN and tabular models share one stratified patient split; CNN early stopping uses validation loss. Run `python -m sepsis_prediction.cli` in place of the installed command when working from a source checkout.
 
 ## Outputs
 
 - `report.html`: self-contained visual report with held-out results and charts, raw six-hour sample observations, engineered-feature sample, and pipeline/data-lineage diagrams. It embeds patient-derived values; share and store it according to dataset and institutional privacy requirements.
-- `cohort_summary.json`: eligible outcome counts and exclusion counts, including records without outcome follow-up.
-- `metrics.json`: AUROC, average precision/AUPRC, sensitivity, specificity, precision, F1, accuracy, Brier score, threshold, and confusion matrix. AUROC/AUPRC are `null` if the test split has only one class.
+- `cohort_summary.json`: eligible outcome counts, configured horizon, and exclusion counts, including incomplete negative follow-up.
+- `metrics.json`: AUROC, average precision/AUPRC, sensitivity, specificity, precision, F1, accuracy, Brier score, validation-selected threshold, and confusion matrix. AUROC/AUPRC are `null` if the test split has only one class.
 - `model_comparison.csv` and `model_curves.png`: held-out comparison table and ROC/precision-recall plots.
+- `model_evaluation.json`, `model_ranking.csv`, `model_forest.png`, `calibration.png`, and `decision_curve.png`: head-to-head ranking, paired bootstrap uncertainty, frozen-threshold operating points, calibration, and decision analysis.
 - `feature_importance.csv`: Logistic Regression coefficients and tree feature importances. These are model associations, not causal or clinical effects.
 - `test_predictions.csv`: held-out patient IDs, labels, probabilities, and thresholded predictions.
-- `split_patients.json`: train/test patient membership for audit and reproducibility.
-- `feature_names.json` and `run_config.json`: feature schema, split parameters, and explicit prediction design.
+- `split_patients.json` and `validation_predictions.csv`: fit/validation/test patient membership and validation outputs for audit and reproducibility.
+- `feature_names.json` and `run_config.json`: feature schema, split parameters, explicit prediction design, and package versions.
 - `logistic_regression.joblib` and `random_forest.joblib`: fitted preprocessing-plus-model pipelines.
 - `xgboost.joblib`: fitted XGBoost pipeline when selected.
 - `cnn_1d.pt`: CNN weights and train-fitted imputation/scaling values when `--cnn` is selected.

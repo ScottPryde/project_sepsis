@@ -10,27 +10,32 @@ flowchart TD
     D -->|Yes| X[Exclude: prevalent label]
     D -->|No| E{Any observed row from hour 6 onward?}
     E -->|No| Y[Exclude: outcome unavailable]
-    E -->|Yes| F[Outcome: any positive label after row 5]
-    F --> G[Patient-group train/test split]
-    G --> H[Tabular summaries]
-    G --> I[Ordered six-hour tensor]
-    H --> J[Train-only imputation/scaling]
-    I --> K[Train-only imputation/scaling]
-    J --> L[Logistic Regression / Random Forest / XGBoost]
-    K --> M[1D CNN, opt-in training]
-    L --> N[Held-out predictions and metrics]
-    M --> N
-    N --> O[Comparison CSV, ROC/PR plots, model artifacts]
+    E -->|Yes| F[Outcome: positive label within configured horizon]
+    F --> G{Positive in horizon or complete follow-up?}
+    G -->|No, incomplete negative| Z[Exclude: incomplete horizon follow-up]
+    G -->|Yes| H[Eligible bounded-horizon cohort]
+    H --> I[Stratified fit/validation/test split]
+    I --> J[Tabular summaries]
+    I --> K[Ordered six-hour tensor]
+    J --> L[Train-only imputation/scaling]
+    K --> M[Train-only imputation/scaling]
+    L --> N[Logistic Regression / Random Forest / XGBoost]
+    M --> O[1D CNN, opt-in training]
+    N --> P[Held-out predictions and metrics]
+    O --> P
+    P --> Q[Comparison report and model artifacts]
 ```
 
 ## Evaluation Protocol
 
-- The fixed six-row look-back and subsequent-label outcome rule are shared between tabular and sequence representations.
-- Patient IDs are groups, not predictors. The single `GroupShuffleSplit` is deterministic for a fixed seed and cohort ordering.
-- Imputation and scaling parameters are learned from training patients only. The CNN likewise estimates each input variable's median, mean, and standard deviation on training tensors only.
-- The 0.5 threshold is fixed by default and is recorded. It is not tuned against the test set.
+- The fixed six-row look-back and configured finite outcome horizon are shared between tabular and sequence representations. Negative examples require complete follow-up; positives observed inside the horizon remain eligible.
+- PhysioNet 2019 `SepsisLabel` switches on six hours before Sepsis-3 onset. The prediction target and interpretation account for this label shift.
+- Patient IDs are groups, not predictors. A deterministic stratified patient split creates fit, validation, and test partitions, shared across all selected models.
+- Imputation and scaling parameters are learned from fit patients only. Validation patients select thresholds and control CNN early stopping; test patients are used once for final evaluation.
+- Static demographic/context variables use their value and missingness indicators only; they are not expanded into redundant temporal statistics.
+- By default each model's highest threshold reaching the target sensitivity (80%) is selected on validation patients, recorded, and applied unchanged to the test patients. `--threshold` is an explicit fixed-threshold override.
 - AUROC and average precision are reported only where both outcome classes occur in the test set. Sensitivity, specificity, precision, F1, accuracy, Brier score, and confusion matrix are also saved.
-- The CNN comparison changes both input representation and model family; a performance difference cannot be attributed to architecture alone.
+- The CNN receives observation masks as channels, alongside imputed values. It still differs from tabular models in both input representation and model family; a performance difference cannot be attributed to architecture alone.
 - This is retrospective educational analysis, not a clinically validated decision-support system. Challenge utility and direct comparison with challenge submissions are not implemented.
 
 ## Indicative Eight-Week Plan
@@ -67,4 +72,4 @@ The calendar dates above are illustrative placeholders and should be shifted to 
 
 ## Reproduction Record
 
-Each model run writes `run_config.json`, `split_patients.json`, `feature_names.json`, and held-out predictions alongside metrics and model files. Record the installed package versions when preparing a final report; the same random seed does not guarantee bit-identical results across different library versions or hardware backends.
+Each model run writes `run_config.json` with package versions, `split_patients.json`, `feature_names.json`, validation and held-out predictions, metrics, and model files. The same random seed does not guarantee bit-identical results across different library versions or hardware backends.

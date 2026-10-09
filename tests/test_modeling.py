@@ -1,7 +1,9 @@
 import json
+import importlib.util
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from sepsis_prediction.modeling import run_experiment
 from sepsis_prediction.cnn import run_cnn_experiment
@@ -25,7 +27,9 @@ def test_group_split_train_only_preprocessing_and_reproducible_artifacts(tmp_pat
     first = tmp_path / "first"
     second = tmp_path / "second"
 
-    selected_models = ("logistic_regression", "random_forest", "xgboost")
+    selected_models = ("logistic_regression", "random_forest")
+    if importlib.util.find_spec("xgboost") is not None:
+        selected_models += ("xgboost",)
     metrics_first = run_experiment(
         features, labels, groups, first, random_state=123, models=selected_models,
     )
@@ -34,7 +38,10 @@ def test_group_split_train_only_preprocessing_and_reproducible_artifacts(tmp_pat
     )
 
     split = json.loads((first / "split_patients.json").read_text(encoding="utf-8"))
-    assert set(split["train"]).isdisjoint(split["test"])
+    assert set(split["fit"]).isdisjoint(split["validation"])
+    assert set(split["fit"]).isdisjoint(split["test"])
+    assert set(split["validation"]).isdisjoint(split["test"])
+    assert set(split["train"]) == set(split["fit"]) | set(split["validation"])
     assert set(split["train"]) | set(split["test"]) == set(groups)
     assert metrics_first == metrics_second
     assert (first / "metrics.json").read_bytes() == (second / "metrics.json").read_bytes()
@@ -42,6 +49,10 @@ def test_group_split_train_only_preprocessing_and_reproducible_artifacts(tmp_pat
     importance = pd.read_csv(first / "feature_importance.csv")
     assert set(importance["importance_type"]) == {"coefficient", "feature_importance"}
     assert set(importance["model"]) == set(selected_models)
+    assert (first / "validation_predictions.csv").is_file()
+    config = json.loads((first / "run_config.json").read_text(encoding="utf-8"))
+    assert config["threshold_selection"] == "validation threshold at target sensitivity"
+    assert set(config["model_thresholds"]) == set(selected_models)
 
     fitted_model = __import__("joblib").load(first / "logistic_regression.joblib")
     fitted_imputer = (
@@ -49,8 +60,8 @@ def test_group_split_train_only_preprocessing_and_reproducible_artifacts(tmp_pat
         .named_transformers_["numeric"]
         .named_steps["imputer"]
     )
-    train_ids = split["train"]
-    expected_median = features.loc[train_ids, "some_missing"].median()
+    fit_ids = split["fit"]
+    expected_median = features.loc[fit_ids, "some_missing"].median()
     assert fitted_imputer.statistics_[1] == expected_median
     assert fitted_imputer.statistics_[2] == 0
     assert set(metrics_first) == set(selected_models)
@@ -64,12 +75,14 @@ def test_group_split_train_only_preprocessing_and_reproducible_artifacts(tmp_pat
         "run_config.json",
         "test_predictions.csv",
         "feature_importance.csv",
-        "xgboost.joblib",
     ):
         assert (first / artifact).is_file()
+    if "xgboost" in selected_models:
+        assert (first / "xgboost.joblib").is_file()
 
 
 def test_cnn_trains_on_shared_patient_split_and_writes_checkpoint(tmp_path) -> None:
+    pytest.importorskip("torch")
     features, labels, groups = make_synthetic_cohort()
     output = tmp_path / "cnn"
     run_experiment(

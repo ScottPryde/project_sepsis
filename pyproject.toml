@@ -14,12 +14,12 @@ dependencies = [
     "numpy>=1.24",
     "pandas>=2.0",
     "scikit-learn>=1.3",
-    "torch>=2.2",
-    "xgboost>=2.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.4"]
+cnn = ["torch>=2.2"]
+xgboost = ["xgboost>=2.0"]
 
 [project.scripts]
 sepsis-pipeline = "sepsis_prediction.cli:main"
