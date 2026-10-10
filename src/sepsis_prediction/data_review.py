@@ -298,8 +298,8 @@ def _field_chart(
             rates = hour_rates.loc[source, field]
             cadence.plot(rates.index, rates.to_numpy(), color=SOURCE_COLOURS[index % 2], linewidth=2, label=source)
     cadence.axvspan(-0.5, LOOKBACK_HOURS - 0.5, color="#e6eae7", zorder=0)
-    cadence.text(LOOKBACK_HOURS / 2 - 0.5, 1.02, "look-back", ha="center", va="bottom", fontsize=8, color=INK_MUTED,
-                 transform=cadence.get_xaxis_transform())
+    cadence.text(LOOKBACK_HOURS - 0.2, 0.97, "← look-back (rows 0-5)", ha="left", va="top", fontsize=8,
+                 color=INK_MUTED, transform=cadence.get_xaxis_transform())
     cadence.set(xlabel="Row (hour index)", ylabel="Share of patients observed", ylim=(0, 1.05),
                 title=f"{field}: observation rate by hour")
     for axis in axes:
@@ -336,7 +336,7 @@ def _cross_field(table: pd.DataFrame, rng: np.random.Generator, path: Path) -> t
     ratio = blood["Hct"] / blood["Hgb"]
     odd_ratio = (ratio < 2) | (ratio > 4.5)
     checks.append({"check": "Hct/Hgb outside 2-4.5", "rule": "flag only", "pairs": int(len(blood)),
-                   "violations": int(odd_ratio.sum())})
+                   "violations": int(odd_ratio.sum()), "low_ratio_band": int(ratio.between(1.2, 1.8).sum())})
     panels.append(("Hgb", "Hct", blood, odd_ratio, "triple", "Hct vs Hgb (line: Hct = 3 × Hgb)"))
     bilirubin = both("Bilirubin_total", "Bilirubin_direct")
     direct_high = bilirubin["Bilirubin_direct"] > bilirubin["Bilirubin_total"]
@@ -485,6 +485,18 @@ def _recommendations(fields: dict[str, dict[str, Any]], cross: list[dict[str, An
             "finding": "Over half of consecutive hourly observations repeat the previous value.",
             "action": "Report repetition per field; do not treat repeated values as new measurements in cadence analyses.",
             "rationale": "Copied-forward values overstate measurement frequency but are not wrong values.",
+        })
+    hct_hgb = next((check for check in cross if check["check"].startswith("Hct/Hgb")), None)
+    if hct_hgb and hct_hgb.get("low_ratio_band"):
+        recommendations.append({
+            "priority": "Investigate",
+            "area": "Hct, Hgb",
+            "finding": f"{hct_hgb['low_ratio_band']:,} rows sit on a separate line with Hct/Hgb between 1.2 and 1.8 "
+                       "instead of about 3.",
+            "action": "Ask the data provider whether Hgb or Hct uses a different unit or field for these rows; "
+                      "keep them until confirmed, as the pattern is systematic rather than random.",
+            "rationale": "A second straight line is the signature of a unit or mapping difference, which a range "
+                         "rule would only partly remove.",
         })
     for check in cross:
         if check["rule"] == "flag only" and check["violations"]:
@@ -806,7 +818,7 @@ details.field {{ margin:6px 10px; }} details.field > summary {{ display:flex; fl
 .field-body {{ padding:4px 16px 14px; }} .field-body img, .panel img {{ display:block; width:100%; height:auto; }}
 .badge {{ display:inline-block; padding:1px 8px; margin:1px 3px 1px 0; border-radius:10px; font-size:11px; background:#fff0d9; color:#6b4a12; border:1px solid #ecd2a2; font-weight:400; }}
 .badge.implement {{ background:#fbebe7; color:#7a2c22; border-color:#efc2b8; }} .badge.pipeline {{ background:#e8f0f8; color:#1d4a78; border-color:#bfd3ea; }}
-.badge.monitor {{ background:#eef2ed; color:#35504d; border-color:#cfd9d3; }}
+.badge.investigate {{ background:#fff0d9; color:#6b4a12; border-color:#ecd2a2; }} .badge.monitor {{ background:#eef2ed; color:#35504d; border-color:#cfd9d3; }}
 .diagram {{ background:#fff; border:1px solid var(--line); padding:10px; }} svg {{ display:block; max-width:100%; height:auto; }}
 .panel {{ background:#fff; border:1px solid var(--line); padding:10px; }}
 </style></head><body>
@@ -820,7 +832,7 @@ details.field {{ margin:6px 10px; }} details.field > summary {{ display:flex; fl
 <h3>Tests and their rationale</h3>{tests_html}</section>
 <section><h2>Dataset overview</h2><div class="summary-grid">{tiles_html}</div>
 <div class="panel"><img alt="Missingness by field and hospital" src="data:image/png;base64,{overview_chart}"></div></section>
-<section><h2>Recommendations</h2><p class="prose">Generated from the findings below. <em>Implement</em> items are rules in <code>quality.py</code>; <em>Pipeline</em> items change how the pipeline is run or evaluated; <em>Monitor</em> items are reported but not cleaned.</p>{recommendations_html}
+<section><h2>Recommendations</h2><p class="prose">Generated from the findings below. <em>Implement</em> items are rules in <code>quality.py</code>; <em>Pipeline</em> items change how the pipeline is run or evaluated; <em>Investigate</em> items need confirmation from the data provider before any rule; <em>Monitor</em> items are reported but not cleaned.</p>{recommendations_html}
 <h3>Quality rule impact on the raw data</h3><p class="muted">Rules run in order; counts are what each rule changes after the earlier ones. SepsisLabel and ICULOS are never changed, so cohort membership and outcomes are unaffected.</p>{rules_html}</section>
 <section><h2>Field summary</h2><p class="muted">Select a field to jump to its detail. SMD: standardised mean difference of the six-hour summary, sepsis minus no sepsis.</p>
 {_table(["Field", "Category", "Missing", "Median", "Implausible", "Hospital KS", "Outcome SMD", "Flags"], summary_rows)}</section>
