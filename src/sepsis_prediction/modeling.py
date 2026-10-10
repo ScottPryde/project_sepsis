@@ -31,9 +31,12 @@ from sklearn.ensemble import RandomForestClassifier
 from sepsis_prediction.features import DEFAULT_HORIZON_HOURS
 
 
+SPLIT_MODES = ("pooled", "hospital")
+
 DESIGN = {
     "lookback_rows": 6,
     "lookback_hours": "hours 0-5 inclusive",
+    "lookback_anchor": "first six rows of each record; ICULOS at row 0 is recorded for audit, not used to shift or exclude",
     "prediction_period": "any SepsisLabel=1 within the configured horizon after hour 5",
     "label_definition": "SepsisLabel switches on six hours before Sepsis-3 onset (PhysioNet 2019)",
     "exclude_positive_in_lookback": True,
@@ -165,6 +168,99 @@ def _threshold_at_sensitivity(y_true: np.ndarray, probabilities: np.ndarray, tar
     return 0.0
 
 
+def split_patients(
+    labels: pd.Series,
+    groups: pd.Series,
+    *,
+    test_size: float = 0.2,
+    validation_size: float = 0.2,
+    random_state: int = 42,
+    split_mode: str = "pooled",
+    sources: pd.Series | None = None,
+    train_sources: tuple[str, ...] = (),
+    test_sources: tuple[str, ...] = (),
+) -> dict[str, np.ndarray]:
+    """Return fit, validation, and test row positions for one patient per row.
+
+    ``pooled`` holds out a stratified random ``test_size`` share of all patients.
+    ``hospital`` uses every patient from ``test_sources`` as the test set and
+    draws fit and validation patients from ``train_sources`` only, so test
+    patients come from a hospital the models never saw. In both modes the
+    validation share is a stratified split of the non-test patients.
+    """
+    if split_mode not in SPLIT_MODES:
+        raise ValueError(f"split_mode must be one of {SPLIT_MODES}")
+    if not 0 < validation_size < 1:
+        raise ValueError("validation_size must be between 0 and 1")
+    if not len(labels) == len(groups) or not labels.index.equals(groups.index):
+        raise ValueError("labels and groups must have matching indexes")
+    if groups.astype(str).duplicated().any():
+        raise ValueError("Expected exactly one cohort row per patient for stratified splitting")
+    positions = np.arange(len(labels))
+
+    if split_mode == "pooled":
+        if not 0 < test_size < 1:
+            raise ValueError("test_size must be between 0 and 1")
+        test_splitter = StratifiedShuffleSplit(n_splits=1, test_size=test_size, random_state=random_state)
+        train_validation_positions, test_positions = next(test_splitter.split(positions, labels))
+    else:
+        if sources is None or not sources.index.equals(labels.index):
+            raise ValueError("hospital split mode needs a sources Series aligned to the labels")
+        if not train_sources or not test_sources:
+            raise ValueError("hospital split mode needs both train_sources and test_sources")
+        if set(train_sources) & set(test_sources):
+            raise ValueError("train_sources and test_sources must not overlap")
+        source_values = sources.astype(str).to_numpy()
+        unknown = (set(train_sources) | set(test_sources)) - set(source_values)
+        if unknown:
+            raise ValueError(f"Unknown sources {sorted(unknown)}; available: {sorted(set(source_values))}")
+        train_validation_positions = positions[np.isin(source_values, train_sources)]
+        test_positions = positions[np.isin(source_values, test_sources)]
+
+    validation_splitter = StratifiedShuffleSplit(
+        n_splits=1, test_size=validation_size, random_state=random_state + 1,
+    )
+    fit_relative, validation_relative = next(validation_splitter.split(
+        train_validation_positions, labels.iloc[train_validation_positions],
+    ))
+    split = {
+        "fit": train_validation_positions[fit_relative],
+        "validation": train_validation_positions[validation_relative],
+        "test": test_positions,
+    }
+    fit_groups = set(groups.iloc[split["fit"]].astype(str))
+    validation_groups = set(groups.iloc[split["validation"]].astype(str))
+    test_groups = set(groups.iloc[split["test"]].astype(str))
+    if fit_groups & validation_groups or fit_groups & test_groups or validation_groups & test_groups:
+        raise RuntimeError("Patient group overlap found between fit, validation, and test")
+    for name, split_positions in split.items():
+        if labels.iloc[split_positions].nunique() != 2:
+            raise ValueError(f"{name.title()} split contains one outcome class; adjust split sizes or seed")
+    return split
+
+
+def _split_composition(
+    labels: pd.Series,
+    sources: pd.Series | None,
+    split: dict[str, np.ndarray],
+) -> dict[str, dict[str, Any]]:
+    composition: dict[str, dict[str, Any]] = {}
+    for name, positions in split.items():
+        part = labels.iloc[positions]
+        entry: dict[str, Any] = {
+            "patients": int(len(part)),
+            "positive_outcomes": int(part.sum()),
+            "prevalence": float(part.mean()),
+        }
+        if sources is not None:
+            entry["by_source"] = {
+                str(source): int(count)
+                for source, count in sources.iloc[positions].astype(str).value_counts().sort_index().items()
+            }
+        composition[name] = entry
+    return composition
+
+
 def run_experiment(
     features: pd.DataFrame,
     labels: pd.Series,
@@ -178,12 +274,12 @@ def run_experiment(
     horizon_hours: int = DEFAULT_HORIZON_HOURS,
     validation_size: float = 0.2,
     target_sensitivity: float = 0.8,
+    split_mode: str = "pooled",
+    sources: pd.Series | None = None,
+    train_sources: tuple[str, ...] = (),
+    test_sources: tuple[str, ...] = (),
 ) -> dict[str, dict[str, Any]]:
     """Split patients, fit selected baselines, and write artifacts."""
-    if not 0 < test_size < 1:
-        raise ValueError("test_size must be between 0 and 1")
-    if not 0 < validation_size < 1:
-        raise ValueError("validation_size must be between 0 and 1")
     if horizon_hours < 1:
         raise ValueError("horizon_hours must be a positive integer")
     supported_models = {"logistic_regression", "random_forest", "xgboost"}
@@ -198,30 +294,19 @@ def run_experiment(
         raise ValueError("No feature rows or feature columns were provided")
     if not features.index.equals(labels.index) or not features.index.equals(groups.index):
         raise ValueError("features, labels, and groups must have matching indexes")
-    if groups.astype(str).duplicated().any():
-        raise ValueError("Expected exactly one cohort row per patient for stratified splitting")
     if labels.nunique() != 2:
         raise ValueError("Training cohort must contain both outcome classes")
 
-    test_splitter = StratifiedShuffleSplit(n_splits=1, test_size=test_size, random_state=random_state)
-    train_validation_positions, test_positions = next(test_splitter.split(features, labels))
-    validation_splitter = StratifiedShuffleSplit(
-        n_splits=1, test_size=validation_size, random_state=random_state + 1,
+    split = split_patients(
+        labels, groups,
+        test_size=test_size, validation_size=validation_size, random_state=random_state,
+        split_mode=split_mode, sources=sources,
+        train_sources=tuple(train_sources), test_sources=tuple(test_sources),
     )
-    fit_relative, validation_relative = next(validation_splitter.split(
-        features.iloc[train_validation_positions], labels.iloc[train_validation_positions],
-    ))
-    fit_positions = train_validation_positions[fit_relative]
-    validation_positions = train_validation_positions[validation_relative]
+    fit_positions = split["fit"]
+    validation_positions = split["validation"]
+    test_positions = split["test"]
     train_positions = np.concatenate([fit_positions, validation_positions])
-    fit_groups = set(groups.iloc[fit_positions].astype(str))
-    validation_groups = set(groups.iloc[validation_positions].astype(str))
-    test_groups = set(groups.iloc[test_positions].astype(str))
-    if fit_groups & validation_groups or fit_groups & test_groups or validation_groups & test_groups:
-        raise RuntimeError("Patient group overlap found between fit, validation, and test")
-    for name, positions in (("fit", fit_positions), ("validation", validation_positions), ("test", test_positions)):
-        if labels.iloc[positions].nunique() != 2:
-            raise ValueError(f"{name.title()} split contains one outcome class; adjust split sizes or seed")
 
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -293,7 +378,11 @@ def run_experiment(
         "models": list(models),
         "model_specs": {name: MODEL_SPECS[name] for name in models},
         "random_state": random_state,
-        "test_size": test_size,
+        "split_mode": split_mode,
+        "train_sources": list(train_sources) if split_mode == "hospital" else None,
+        "test_sources": list(test_sources) if split_mode == "hospital" else None,
+        "split_composition": _split_composition(labels, sources, split),
+        "test_size": test_size if split_mode == "pooled" else None,
         "validation_size": validation_size,
         "threshold_selection": (
             "fixed user override" if threshold is not None

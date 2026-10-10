@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Early Sepsis Prediction: Project Proposal and Rationale</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    color-scheme: light;
+    --ink: #1a1d21;
+    --muted: #5b6370;
+    --rule: #d9dde3;
+    --soft: #f5f6f8;
+    --accent: #1f5f8b;
+    --accent-soft: #e8f0f6;
+    --warn: #a35a00;
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  html { scroll-padding-top: env(safe-area-inset-top, 0px); background: #ffffff; }
+  *, *::before, *::after { box-sizing: inherit; }
+  body {
+    margin: 0;
+    background: #ffffff;
+    color: var(--ink);
+    font: 400 8.7pt/1.33 "Source Sans 3", "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  .page {
+    max-width: 210mm;
+    margin: 0 auto;
+    padding: 10mm 13mm 8mm;
+    background: #ffffff;
+  }
+  .page + .page { border-top: 1px dashed var(--rule); }
+  header.doc { border-bottom: 2px solid var(--ink); padding-bottom: 6px; margin-bottom: 8px; }
+  .eyebrow { font-size: 7.6pt; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); font-weight: 600; margin: 0 0 2px; }
+  h1 { font-size: 15pt; line-height: 1.2; margin: 0 0 3px; font-weight: 600; }
+  .meta { color: var(--muted); font-size: 8pt; margin: 0; }
+  h2 { font-size: 10pt; margin: 7px 0 2px; font-weight: 600; display: flex; gap: 6px; align-items: baseline; }
+  h2 .n { color: var(--accent); font-weight: 600; }
+  p { margin: 0 0 5px; }
+  ul { margin: 0 0 5px; padding-left: 15px; }
+  li { margin: 0 0 2px; }
+  strong { font-weight: 600; }
+  .lead { font-size: 8.9pt; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+  .table-wrap { overflow-x: auto; max-width: 100%; }
+  table { border-collapse: collapse; width: 100%; font-size: 7.9pt; line-height: 1.28; margin: 1px 0 4px; }
+  th, td { text-align: left; vertical-align: top; padding: 1.6px 6px 1.6px 0; border-bottom: 1px solid var(--rule); }
+  th { font-weight: 600; color: var(--muted); font-size: 7.5pt; text-transform: uppercase; letter-spacing: .04em; border-bottom: 1px solid var(--ink); }
+  td:first-child { font-weight: 500; white-space: nowrap; }
+  code, pre, .mono { font-family: "IBM Plex Mono", Consolas, "Courier New", monospace; }
+  code { font-size: 8pt; background: var(--soft); padding: 0 3px; border-radius: 2px; }
+  pre {
+    margin: 2px 0 6px; padding: 6px 8px; background: var(--soft); border-left: 2px solid var(--accent);
+    font-size: 7.2pt; line-height: 1.28; overflow-x: auto; white-space: pre;
+  }
+  figure { margin: 4px 0 2px; }
+  figure svg { display: block; width: 100%; height: auto; }
+  figcaption { font-size: 7.6pt; color: var(--muted); margin-top: 2px; }
+  .note { font-size: 7.9pt; color: var(--muted); }
+  .refs { font-size: 7.4pt; line-height: 1.26; padding-left: 16px; margin: 0; }
+  .refs li { margin-bottom: 1.5px; }
+  .refs a { color: var(--accent); text-decoration: none; word-break: break-word; }
+  footer.pg { margin-top: 6px; padding-top: 4px; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; color: var(--muted); font-size: 7.2pt; }
+  @page { size: A4; margin: 0; }
+  @media print {
+    .page { max-width: none; width: 210mm; height: 297mm; overflow: hidden; page-break-after: always; break-after: page; }
+    .page + .page { border-top: none; }
+  }
+  @media (max-width: 640px) {
+    .page { padding: 18px 16px; }
+    .cols { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ============================ PAGE 1 ============================ -->
+<section class="page" aria-label="Page 1">
+  <header class="doc">
+    <p class="eyebrow">Project proposal and rationale</p>
+    <h1>Early Sepsis Prediction from the First Six ICU Hours: Supervised and Unsupervised Exploration</h1>
+    <p class="meta">Scott Pryde &middot; project_sepsis &middot; 10 October 2026 &middot; Redevelopment period: five weeks</p>
+  </header>
+
+  <h2><span class="n">1</span>Proposal</h2>
+  <p class="lead">The feasibility test confirmed that the PhysioNet/CinC Challenge 2019 dataset can support a leakage-safe pipeline that compares supervised and unsupervised AI methods on the same patients. This proposal redevelops that prototype over five weeks into a reproducible study and a basic application. The study predicts, from hours 0&ndash;5 of an ICU stay, whether a patient meets Sepsis-3 criteria within a fixed horizon, and explores label-free structure in the same data.</p>
+
+  <h2><span class="n">2</span>Rationale</h2>
+  <div class="cols">
+    <div>
+      <p><strong>Why this dataset.</strong> It is open access, large (40,336 ICU patients), labelled hourly against Sepsis-3, and drawn from two hospital systems, allowing external validation without new data agreements. Its informative missingness is realistic, and published Challenge results give a benchmark.</p>
+      <p><strong>Why both method families.</strong> Supervised models answer &ldquo;who will develop sepsis?&rdquo;. Unsupervised methods ask whether that risk is already visible as structure, such as subgroups or unusual physiology, before any label is used.</p>
+    </div>
+    <div>
+      <p><strong>What the feasibility test established.</strong></p>
+      <ul>
+        <li>Data loads, validates and converts to one row per patient, with train-only preprocessing and patient-level splits.</li>
+        <li>Four supervised models and a self-contained HTML report already run end to end.</li>
+        <li>Issues to fix in redevelopment: an open-ended outcome window, inconsistent class weighting, no validation split, no cross-site test, and no unsupervised methods (tracked in <code>IMPROVEMENTS.md</code>).</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2><span class="n">3</span>Data source and sampling</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Element</th><th>Definition</th></tr></thead>
+    <tbody>
+      <tr><td>Source</td><td>PhysioNet/CinC Challenge 2019, version 1.0.0, training sets A and B: 40,336 patients, 2,932 septic (7.3%), 40 hourly variables plus <code>SepsisLabel</code>. Records have at least 8 hours and are capped at two weeks.</td></tr>
+      <tr><td>Unit and timing</td><td>One prediction per patient at the end of hour 5. Inputs are hours 0&ndash;5 only.</td></tr>
+      <tr><td>Outcome</td><td><code>SepsisLabel</code> = 1 within a fixed horizon after hour 5 (primary 24 h; sensitivity analyses at 12 h and 48 h). The label already switches on 6 h before onset. Negatives need complete follow-up for the horizon.</td></tr>
+      <tr><td>Splits</td><td>Stratified, patient-level, seeded 60 / 20 / 20 train / validation / test. External checks: train on A and test on B, then the reverse. Five repeated seeds for rank stability.</td></tr>
+      <tr><td>Uncertainty</td><td>1,000 paired bootstrap resamples of the test patients for every reported metric.</td></tr>
+      <tr><td>Development sample</td><td>A stratified 10% subsample (about 4,000 patients) for fast iteration. All reported results use the full data.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2><span class="n">4</span>Synthetic data definition</h2>
+  <p>A seeded generator (<code>synthetic.py</code>) produces files with the real schema, so tests, CI and the application can run without the real data. Synthetic results are never reported as findings.</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Property</th><th>Specification</th></tr></thead>
+    <tbody>
+      <tr><td>Schema</td><td>Identical PSV columns and order (40 variables + <code>SepsisLabel</code>). Files are prefixed <code>s</code> so they cannot be mixed with real <code>p</code> files.</td></tr>
+      <tr><td>Population</td><td>Configurable size (default 2,000; 40,000 for scale tests), split 50/50 between two simulated sites with different baseline means and lab-ordering rates.</td></tr>
+      <tr><td>Stay length</td><td>Log-normal, bounded to 8&ndash;336 hours to match the real data's limits.</td></tr>
+      <tr><td>Risk and onset</td><td>Latent risk per patient sets the outcome via a logistic link, targeting 7% prevalence. Onset is at hour 4 or later; labels switch on 6 h before onset, as in PhysioNet.</td></tr>
+      <tr><td>Signals</td><td>Vitals drift with latent risk towards onset, plus autocorrelated noise. Three planted subgroups (hypotensive, febrile, respiratory) test whether clustering recovers known structure.</td></tr>
+      <tr><td>Missingness</td><td>Vitals 10&ndash;30% missing per hour; labs 80&ndash;98%, with ordering more frequent at higher risk (informative missingness).</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2><span class="n">5</span>Architecture and data pipeline</h2>
+  <figure>
+    <svg viewBox="0 0 1024 280" role="img" aria-label="Data pipeline from sources to application" font-family="Source Sans 3, Segoe UI, Arial, sans-serif">
+      <defs>
+        <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#6b7480"/></marker>
+      </defs>
+      <g fill="none" stroke="#6b7480" stroke-width="1.3">
+        <path d="M150 42H182" marker-end="url(#ar)"/>
+        <path d="M150 104H166V60H182" marker-end="url(#ar)"/>
+        <path d="M352 56H382" marker-end="url(#ar)"/>
+        <path d="M552 56H582" marker-end="url(#ar)"/>
+        <path d="M752 56H782" marker-end="url(#ar)"/>
+        <path d="M867 92V130H100V160" marker-end="url(#ar)"/>
+        <path d="M294 130V160" marker-end="url(#ar)"/>
+        <path d="M384 194H414" marker-end="url(#ar)"/>
+        <path d="M100 228V244H504V228" marker-end="url(#ar)"/>
+        <path d="M594 194H624" marker-end="url(#ar)"/>
+        <path d="M804 194H834" marker-end="url(#ar)"/>
+      </g>
+      <!-- row 1 -->
+      <g>
+        <rect x="10" y="20" width="140" height="44" rx="6" fill="#e8f0f6" stroke="#1f5f8b" stroke-width="1.4"/>
+        <text x="80" y="38" text-anchor="middle" font-size="12.5" font-weight="600" fill="#1a1d21">PhysioNet 2019</text>
+        <text x="80" y="54" text-anchor="middle" font-size="11" fill="#5b6370">v1.0.0, sets A and B</text>
+        <rect x="10" y="82" width="140" height="44" rx="6" fill="#ffffff" stroke="#6b7480" stroke-width="1.2" stroke-dasharray="5 3"/>
+        <text x="80" y="100" text-anchor="middle" font-size="12.5" font-weight="600" fill="#1a1d21">Synthetic generator</text>
+        <text x="80" y="116" text-anchor="middle" font-size="11" fill="#5b6370">tests, CI, app demos</text>
+      </g>
+      <g>
+        <rect x="182" y="20" width="170" height="72" rx="6" fill="#ffffff" stroke="#6b7480" stroke-width="1.2"/>
+        <text x="267" y="40" text-anchor="middle" font-size="12.5" font-weight="600" fill="#1a1d21">Ingest and validate</text>
+        <text x="267" y="58" text-anchor="middle" font-size="11" fill="#5b6370">download, checksums,</text>
+        <text x="267" y="73" text-anchor="middle" font-size="11" fill="#5b6370">schema checks, parquet cache</text>
+      </g>
+      <g>
+        <rect x="382" y="20" width="170" height="72" rx="6" fill="#ffffff" stroke="#6b7480" stroke-width="1.2"/>
+        <text x="467" y="40" text-anchor="middle" font-size="12.5" font-weight="600" fill="#1a1d21">Cohort builder</text>
+        <text x="467" y="58" text-anchor="middle" font-size="11" fill="#5b6370">inputs hours 0&#8211;5, fixed-</text>
+        <text x="467" y="73" text-anchor="middle" font-size="11" fill="#5b6370">horizon outcome, exclusions</text>
+      </g>
+      <g>
+        <rect x="582" y="20" width="170" height="72" rx="6" fill="#ffffff" stroke="#6b7480" stroke-width="1.2"/>
+        <text x="667" y="40" text-anchor="middle" font-size="12.5" font-weight="600" fill="#1a1d21">Patient split</text>
+        <text x="667" y="58" text-anchor="middle" font-size="11" fill="#5b6370">train / validation / test,</text>
+        <text x="667" y="73" text-anchor="middle" font-size="11" fill="#5b6370">site A &#8596; B, seeded</text>
+      </g>
+      <g>
+        <rect x="782" y="20" width="170" height="72" rx="6" fill="#ffffff" stroke="#6b7480" stroke-width="1.2"/>
+        <text x="867" y="40" text-anchor="middle" font-size="12.5" font-weight="600" fill="#1a1d21">Representations</text>
+        <text x="867" y="58" text-anchor="middle" font-size="11" fill="#5b6370">tabular summaries;</text>
+        <text x="867" y="73" text-anchor="middle" font-size="11" fill="#5b6370">sequence tensor + masks</text>
+      </g>
+      <text x="512" y="120" text-anchor="middle" font-size="10.5" fill="#5b6370">all learned preprocessing fitted on training patients only</text>
+      <!-- row 2 -->
+      <g>
+        <rect x="10" y="160" width="180" height="68" rx="6" fill="#e8f0f6" stroke="#1f5f8b" stroke-width="1.4"/>
+        <text x="100" y="180" text-anchor="middle" font-size="12.5" font-weight="600" fill="#1a1d21">Supervised</text>
+        <text x="100" y="197" text-anchor="middle" font-size="11" fill="#1a1d21">Logistic Regression, RF,</text>
+        <text x="100" y="212" text-anchor="middle" font-size="11" fill="#1a1d21">XGBoost, 1D CNN</text>
+      </g>
+      <g>
+        <rect x="204" y="160" width="180" height="68" rx="6" fill="#fdf3e6" stroke="#a35a00" stroke-width="1.4"/>
+        <text x="294" y="180" text-anchor="middle" font-size="12.5" font-weight="600" fill="#1a1d21">Unsupervised</text>
+        <text x="294" y="197" text-anchor="middle" font-size="11" fill="#1a1d21">PCA / UMAP, k-means, GMM,</text>
+        <text x="294" y="212" text-anchor="middle" font-size="11" fill="#1a1d21">Isolation Forest, autoencoder</text>
+      </g>
+      <g>
+        <rect x="414" y="160" width="180" height="68" rx="6" fill="#ffffff" stroke="#6b7480" stroke-width="1.2"/>
+        <text x="504" y="180" text-anchor="middle" font-size="12.5" font-weight="600" fill="#1a1d21">Evaluation</text>
+        <text x="504" y="197" text-anchor="middle" font-size="11" fill="#5b6370">bootstrap CIs, calibration,</text>
+        <text x="504" y="212" text-anchor="middle" font-size="11" fill="#5b6370">net benefit, cluster outcomes</text>
+      </g>
+      <g>
+        <rect x="624" y="160" width="180" height="68" rx="6" fill="#ffffff" stroke="#6b7480" stroke-width="1.2"/>
+        <text x="714" y="180" text-anchor="middle" font-size="12.5" font-weight="600" fill="#1a1d21">Run artifacts</text>
+        <text x="714" y="197" text-anchor="middle" font-size="11" fill="#5b6370">outputs/runs/&lt;run-id&gt;:</text>
+        <text x="714" y="212" text-anchor="middle" font-size="11" fill="#5b6370">config, predictions, models</text>
+      </g>
+      <g>
+        <rect x="834" y="160" width="180" height="68" rx="6" fill="#e8f0f6" stroke="#1f5f8b" stroke-width="1.4"/>
+        <text x="924" y="180" text-anchor="middle" font-size="12.5" font-weight="600" fill="#1a1d21">Application</text>
+        <text x="924" y="197" text-anchor="middle" font-size="11" fill="#1a1d21">HTML report and</text>
+        <text x="924" y="212" text-anchor="middle" font-size="11" fill="#1a1d21">Streamlit explorer</text>
+      </g>
+      <text x="512" y="270" text-anchor="middle" font-size="10.5" fill="#5b6370">Labels fit the supervised models only; unsupervised results are compared with outcomes after fitting.</text>
+    </svg>
+    <figcaption>Figure 1. Pipeline from source data to application. Both method families read the same split and features and are scored by one evaluation module.</figcaption>
+  </figure>
+
+  <footer class="pg"><span>Early Sepsis Prediction &middot; proposal</span><span>Page 1 of 2</span></footer>
+</section>
+
+<!-- ============================ PAGE 2 ============================ -->
+<section class="page" aria-label="Page 2">
+
+  <h2 style="margin-top:0"><span class="n">6</span>Environment and folder structure</h2>
+  <div class="cols">
+    <div>
+      <p>A single Python 3.11 virtual environment holds both the ML pipeline and the application. Dependencies are split into optional extras so each part installs only what it needs.</p>
+<pre>py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1          # Windows
+python -m pip install -U pip
+pip install -e ".[ml,explore,app,dev]"
+pip install -e ".[cnn]"               # PyTorch, optional
+python scripts\download_data.py --flat
+python scripts\make_synthetic.py --n 2000
+pytest
+sepsis-pipeline run --config configs\default.yaml
+streamlit run app\Home.py</pre>
+      <p class="note">Extras: <code>ml</code> core pipeline; <code>cnn</code> PyTorch; <code>explore</code> UMAP; <code>app</code> Streamlit; <code>dev</code> tests and linting. <code>.venv/</code>, <code>data/</code> and <code>outputs/</code> stay out of Git.</p>
+      <p><strong>Basic application.</strong> A read-only Streamlit app over saved run artifacts: cohort overview, model comparison, cluster explorer, and a patient viewer for synthetic patients. It never trains models.</p>
+    </div>
+    <div>
+<pre>project_sepsis/
+&#9500;&#9472; pyproject.toml   README.md   IMPROVEMENTS.md
+&#9500;&#9472; configs/            default.yaml, horizons.yaml
+&#9500;&#9472; data/               (git-ignored)
+&#9474;  &#9500;&#9472; raw/training_setA/ ... training_setB/
+&#9474;  &#9500;&#9472; processed/       parquet cache
+&#9474;  &#9492;&#9472; synthetic/
+&#9500;&#9472; src/sepsis_prediction/
+&#9474;  &#9500;&#9472; data.py  cohort.py  features.py  splits.py
+&#9474;  &#9500;&#9472; synthetic.py
+&#9474;  &#9500;&#9472; supervised/      tabular.py  cnn.py
+&#9474;  &#9500;&#9472; unsupervised/    embedding.py  clustering.py
+&#9474;  &#9474;                    anomaly.py  autoencoder.py
+&#9474;  &#9500;&#9472; evaluation.py  reporting.py  cli.py
+&#9500;&#9472; app/
+&#9474;  &#9500;&#9472; Home.py
+&#9474;  &#9492;&#9472; pages/  1_Cohort.py  2_Models.py
+&#9474;            3_Clusters.py  4_Patient.py
+&#9500;&#9472; scripts/            download_data.py  make_synthetic.py
+&#9500;&#9472; tests/              unit, pipeline, app smoke tests
+&#9500;&#9472; docs/               design, data card, model cards
+&#9492;&#9472; outputs/runs/&lt;run-id&gt;/   (git-ignored)</pre>
+    </div>
+  </div>
+
+  <h2><span class="n">7</span>Models and libraries</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Family</th><th>Models</th><th>Purpose</th><th>Libraries</th></tr></thead>
+    <tbody>
+      <tr><td>Supervised, tabular</td><td>Logistic Regression, Random Forest, XGBoost</td><td>Interpretable baseline, non-linear ensemble, gradient boosting</td><td>scikit-learn, xgboost</td></tr>
+      <tr><td>Supervised, sequence</td><td>1D CNN with missingness masks</td><td>Tests whether hour-by-hour order adds signal</td><td>PyTorch</td></tr>
+      <tr><td>Unsupervised, structure</td><td>PCA, UMAP, k-means, Gaussian mixture</td><td>Label-free views and patient subgroups</td><td>scikit-learn, umap-learn</td></tr>
+      <tr><td>Unsupervised, anomaly</td><td>Isolation Forest, sequence autoencoder</td><td>Does &ldquo;unusual&rdquo; predict sepsis without labels?</td><td>scikit-learn, PyTorch</td></tr>
+      <tr><td>Data and evaluation</td><td>&mdash;</td><td>Loading, caching, statistics, figures, configs</td><td>pandas, NumPy, pyarrow, SciPy, matplotlib, PyYAML</td></tr>
+      <tr><td>Application and quality</td><td>&mdash;</td><td>Explorer app, tests, linting</td><td>Streamlit, pytest, ruff</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note">Every model reports AUROC and AUPRC with bootstrap CIs, alert burden at a validation-chosen 80% sensitivity, calibration slope and net benefit. Clusters report stability (adjusted Rand index) and outcome rates with 95% intervals.</p>
+
+  <h2><span class="n">8</span>Five-week plan</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Week</th><th>Focus</th><th>Exit criterion</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>Environment, restructured repo, data download and cache, synthetic generator, cohort with fixed horizon</td><td>Tests pass on synthetic data; cohort counts match the source</td></tr>
+      <tr><td>2</td><td>Supervised baselines with validation split, consistent class weighting, site A&#8596;B validation</td><td>Model comparison with CIs on real data</td></tr>
+      <tr><td>3</td><td>Unsupervised module: embeddings, clustering with stability, anomaly baseline</td><td>Planted subgroups recovered on synthetic data; real-data clusters profiled</td></tr>
+      <tr><td>4</td><td>CNN with masks, optional autoencoder, unified report</td><td>Report covers both families from one run</td></tr>
+      <tr><td>5</td><td>Streamlit application, documentation, full runs, write-up</td><td>App runs from saved artifacts; results reproducible from config</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2><span class="n">9</span>References</h2>
+  <ol class="refs">
+    <li>Reyna MA, Josef CS, Jeter R, et al. Early prediction of sepsis from clinical data: the PhysioNet/Computing in Cardiology Challenge 2019. <em>Crit Care Med</em>. 2020;48(2):210&ndash;217. <a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC6964870">pmc.ncbi.nlm.nih.gov/articles/PMC6964870</a></li>
+    <li>Reyna MA, Josef C, Jeter R, et al. Early Prediction of Sepsis from Clinical Data: The PhysioNet/Computing in Cardiology Challenge 2019 (version 1.0.0). PhysioNet. <a href="https://physionet.org/content/challenge-2019/1.0.0/">physionet.org/content/challenge-2019/1.0.0</a></li>
+    <li>Goldberger AL, Amaral LAN, Glass L, et al. PhysioBank, PhysioToolkit, and PhysioNet. <em>Circulation</em>. 2000;101(23):e215&ndash;e220.</li>
+    <li>Singer M, Deutschman CS, Seymour CW, et al. The Third International Consensus Definitions for Sepsis and Septic Shock (Sepsis-3). <em>JAMA</em>. 2016;315(8):801&ndash;810.</li>
+    <li>Seymour CW, Kennedy JN, Wang S, et al. Derivation, validation, and potential treatment implications of novel clinical phenotypes for sepsis. <em>JAMA</em>. 2019;321(20):2003&ndash;2017.</li>
+    <li>Collins GS, Moons KGM, Dhiman P, et al. TRIPOD+AI statement: updated guidance for reporting clinical prediction models that use regression or machine learning methods. <em>BMJ</em>. 2024;385:e078378.</li>
+    <li>Vickers AJ, Elkin EB. Decision curve analysis: a novel method for evaluating prediction models. <em>Med Decis Making</em>. 2006;26(6):565&ndash;574.</li>
+    <li>Saito T, Rehmsmeier M. The precision-recall plot is more informative than the ROC plot when evaluating binary classifiers on imbalanced datasets. <em>PLoS One</em>. 2015;10(3):e0118432.</li>
+    <li>Pedregosa F, Varoquaux G, Gramfort A, et al. Scikit-learn: machine learning in Python. <em>J Mach Learn Res</em>. 2011;12:2825&ndash;2830.</li>
+    <li>Chen T, Guestrin C. XGBoost: a scalable tree boosting system. <em>Proc KDD</em>. 2016:785&ndash;794.</li>
+    <li>McInnes L, Healy J, Melville J. UMAP: uniform manifold approximation and projection for dimension reduction. arXiv:1802.03426. 2018.</li>
+    <li>Liu FT, Ting KM, Zhou ZH. Isolation forest. <em>Proc IEEE ICDM</em>. 2008:413&ndash;422.</li>
+    <li>Pryde S. project_sepsis: feasibility pipeline and improvement plan. <a href="https://github.com/ScottPryde/project_sepsis">github.com/ScottPryde/project_sepsis</a></li>
+  </ol>
+
+  <footer class="pg"><span>Early Sepsis Prediction &middot; proposal</span><span>Page 2 of 2</span></footer>
+</section>
+
+</body>
+</html>

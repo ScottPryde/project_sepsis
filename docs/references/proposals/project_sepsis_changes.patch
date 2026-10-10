@@ -1,0 +1,1087 @@
+diff --git a/IMPROVEMENTS.md b/IMPROVEMENTS.md
+new file mode 100644
+index 0000000..cf150e9
+--- /dev/null
++++ b/IMPROVEMENTS.md
+@@ -0,0 +1,153 @@
++# Improvement Plan
++
++This plan follows a review of the pipeline's design, code and tests. The engineering is sound: learned preprocessing is fitted on training patients only, patient overlap is checked, ICULOS is excluded with a stated reason, runs are recorded, and the cohort timing is tested. The issues below are mainly in the prediction design and evaluation, which decide what the results mean.
++
++Items are ordered by how much they change the interpretation of results. Each one states the problem, the change, where it goes in the code, and how to tell it is done.
++
++## Status
++
++| # | Item | Priority | Status |
++|---|---|---|---|
++| 0 | Head-to-head model comparison, methodology section and per-model lineage diagram in the report | — | Done in this change |
++| 1 | Document the six-hour label shift | High | To do |
++| 2 | Fixed outcome horizon with complete follow-up | High | To do |
++| 3 | Consistent class weighting and a validation-chosen threshold | High | To do |
++| 4 | Validation split for threshold selection and CNN early stopping | High | To do |
++| 5 | Cross-hospital validation (set A versus set B) | High | To do |
++| 6 | Give the CNN the same missingness information | Medium | To do |
++| 7 | Repeated splits or cross-validation for stable rankings | Medium | To do |
++| 8 | Permutation importance or SHAP instead of impurity importance | Medium | To do |
++| 9 | Engineering and packaging fixes | Low | To do |
++
++---
++
++## 0. Model comparison in the report (done)
++
++The report previously listed metrics at a fixed 0.5 threshold. Because the models use different class weighting, those numbers compared different operating points rather than different models.
++
++New module `src/sepsis_prediction/evaluation.py`, called from `write_model_comparison`, now produces the following from `test_predictions.csv`, so every model is judged on the same patients:
++
++- **Ranking.** Models are ranked by AUPRC with AUROC as a tie-break, using paired percentile bootstrap 95% CIs (1,000 resamples, seeded from the run's random state).
++- **Distinguishability.** Each model's AUPRC and AUROC difference from the top model is bootstrapped. A model is called worse only when the interval excludes zero. The verdict distinguishes "worse on both metrics" from "worse on AUPRC only".
++- **Matched-sensitivity operating point.** At 80% sensitivity the report gives specificity, PPV, alerts per 100 patients, alerts per true case and missed cases per 100 patients.
++- **Calibration.** It reports calibration-in-the-large, the logistic calibration slope, 10-bin ECE and a decile calibration curve.
++- **Clinical utility.** It plots decision-curve net benefit against treat-all and treat-none, for thresholds from 1% to 50%.
++- **Outputs.** The module writes `model_evaluation.json`, `model_ranking.csv`, `model_forest.png`, `calibration.png` and `decision_curve.png`.
++
++The report also has:
++
++- a **Methodology** section built from `run_config.json`, including per-model specs now recorded by `MODEL_SPECS` in `modeling.py` and the CNN block in `cnn.py`;
++- a **pipeline diagram with one lane per model**, showing each model's representation, train-only preprocessing and estimator, with dashed lanes for models not selected in the run.
++
++The fixed-threshold metrics remain in a collapsible block, labelled as not like-for-like. Tests are in `tests/test_evaluation.py`.
++
++**Known limitation.** The 80%-sensitivity threshold is chosen on the test patients, so those columns describe the models and are not an estimate of deployed performance. Item 4 removes this limitation.
++
++---
++
++## 1. Document the six-hour label shift
++
++**Problem.** In the PhysioNet 2019 data, `SepsisLabel` already turns on six hours before the Sepsis-3 onset time (t ≥ t_sepsis − 6). Excluding patients labelled positive in rows 0–5 therefore removes everyone with onset before about hour 12. A positive outcome means onset at about hour 12 or later. The proposal's risk table names this exact risk ("dataset labels are misunderstood"), but the README and design doc never state it.
++
++**Change.** State it in `README.md` under Prediction Design, in `docs/experimental_design.md`, and in the `DESIGN` dict in `modeling.py`, for example as `"label_definition": "SepsisLabel=1 from t_sepsis-6h (PhysioNet shift)"`. The report methodology already explains it.
++
++**Done when.** A reader of the README can say what onset time a positive outcome corresponds to.
++
++## 2. Fixed outcome horizon with complete follow-up
++
++**Problem.** The outcome is "any positive label for the rest of the record". That window varies from 1 hour to weeks:
++
++- A patient with 7 rows is counted as a confirmed negative after 1 hour of follow-up.
++- Longer stays have more chances to turn positive, so the model partly learns length of stay, a proxy for acuity, rather than impending sepsis.
++- Results cannot be stated as "risk of sepsis in the next N hours".
++
++**Change.**
++- Add a `--horizon-hours` option, defaulting to 24, so the outcome is any positive label in rows 6 to 6 + H − 1.
++- Exclude negatives whose record ends before the horizon closes, as a new exclusion reason `incomplete_horizon_followup`.
++- Keep positives that fall within the horizon even if the record ends early.
++- Record the horizon in `DESIGN` and `run_config.json`.
++- Run H = 12, 24 and 48 and report all three. This also delivers the "how early" analysis promised in proposal section 8.2.
++
++**Where.** `create_patient_example` and the exclusion bookkeeping in `features.py`, the CLI arguments, the `DESIGN` dict, and the cohort timing tests.
++
++**Done when.** The tests cover a negative with short follow-up (excluded), a positive just inside the horizon (kept as positive), and a positive just outside it (negative if follow-up is complete).
++
++## 3. Consistent class weighting and a validation-chosen threshold
++
++**Problem.** Logistic Regression, Random Forest and the CNN are class-weighted, but XGBoost is not (it has no `scale_pos_weight`). At a fixed 0.5 threshold with low prevalence, unweighted models can show near-zero sensitivity for reasons unrelated to how well they rank patients. On the synthetic sample, Random Forest and XGBoost both scored 0 sensitivity at 0.5 despite similar AUROC. Reweighting also inflates predicted risks, which worsens the Brier score and the calibration slope.
++
++**Change.** Pick one policy and apply it to every model:
++- **Option A (preferred for probabilities that mean something):** remove all class weighting, then choose the threshold on validation data.
++- **Option B:** weight every model, including `scale_pos_weight` for XGBoost, and add a post-hoc calibration step (`CalibratedClassifierCV` or isotonic calibration on validation data).
++
++Record the policy in `MODEL_SPECS`.
++
++**Done when.** The "Class weighting" column in the report's model table reads the same for every model.
++
++## 4. Validation split for threshold selection and CNN early stopping
++
++**Problem.** There is one train/test split and no validation data, although proposal section 8.1 commits to one. The CNN trains for a fixed number of epochs with no early stopping. Any threshold other than 0.5 has to be picked on the test set.
++
++**Change.**
++- Split the training patients again into fit and validation sets (for example 80/20, stratified, seeded).
++- Use the validation set to choose each model's 80%-sensitivity threshold and to early-stop the CNN on validation loss or AUPRC.
++- Apply the frozen thresholds to the test set, and switch the report's operating-point columns to those thresholds.
++- Save `split_patients.json` with `fit`, `validation` and `test` keys.
++
++**Done when.** The report states "threshold chosen on validation patients". The caveat in item 0 can then be deleted, and the test-set sensitivity at the frozen threshold is reported honestly, even if it falls below 80%.
++
++## 5. Cross-hospital validation
++
++**Problem.** The data come from two hospitals: `training_setA` (`p0…` files) and `training_setB` (`p1…` files). A random split mixes them, so the results say nothing about transfer to a new site. That is the most important question for any deployment.
++
++**Change.**
++- Allow `--data-dir` to take several directories, or add `--site-from-filename`.
++- Record each patient's site.
++- Add `--split site` to train on A and test on B, then the reverse.
++- Report both directions next to the random split.
++
++**Done when.** The report shows three result blocks (random, A→B and B→A) and the methodology names the split strategy.
++
++## 6. Give the CNN the same missingness information
++
++**Problem.** The tabular models receive `missing_fraction` and `any_missing` features. The CNN receives median-imputed values with no indication of which were measured. In ICU data, whether a test was ordered is often strongly predictive, so the CNN–tabular comparison currently mixes "temporal order" with "less information". XGBoost can also handle NaN natively, and imputing before it removes that signal.
++
++**Change.**
++- Add one binary mask channel per variable to the CNN input, doubling the channels, and optionally a "hours since last observation" channel.
++- Add an XGBoost variant without the imputer.
++- Update the report methodology text, which currently states that the CNN has no missingness flags.
++
++**Done when.** The CNN input description in `MODEL_SPECS` lists mask channels, and the representation comparison can be described as "same information, different structure".
++
++## 7. Repeated splits or cross-validation
++
++**Problem.** Rankings from one split are fragile when the test set has few positive patients. The report now warns when there are fewer than 30.
++
++**Change.** Add `--repeats K` to run K seeded stratified splits, or stratified 5-fold cross-validation on the training data. Report the mean and spread of AUPRC and AUROC per model, and how often each model ranks first.
++
++**Done when.** `model_evaluation.json` has a `repeats` block and the report shows rank stability.
++
++## 8. Better feature attribution
++
++**Problem.** `feature_importance.csv` uses impurity-based importances for the tree models. These favour continuous, high-cardinality features and are computed on training data.
++
++**Change.** Compute `sklearn.inspection.permutation_importance` on the test patients using AUPRC as the score, for every tabular model. Optionally add SHAP for the top model, as planned in the proposal. Keep the existing caution that importances are associations, not causes.
++
++**Done when.** The report shows a top-15 permutation-importance chart per model.
++
++## 9. Engineering and packaging fixes
++
++- **Make PyTorch optional.** `torch` is a hard dependency even though the CNN is opt-in, and it adds several GB to installs. Move it to `[project.optional-dependencies] cnn = ["torch>=2.2"]`, and consider the same for `xgboost`.
++- **Drop constant features.** The static variables (Age, Gender, Unit1, Unit2, HospAdmTime) get min, max, std and delta features, about 30 constant columns. Emit only the value and a missing flag for these.
++- **Remove duplicated logic.** The exclusion-reason logic appears in both `create_examples` and `create_sequence_examples`. Have `create_patient_example` return the reason and share it.
++- **Stratify the split.** With one row per patient, `GroupShuffleSplit` is an unstratified random split. `StratifiedShuffleSplit` keeps test prevalence stable and is still patient-level.
++- **Validate hour contiguity.** Rows are assumed to be consecutive hours. Use ICULOS (still never as a predictor) in `validate_patient_frame` to check that it increases by 1 per row.
++- **Decouple the CNN step.** `run_cnn_experiment` reads and rewrites the tabular `test_predictions.csv`, `metrics.json` and `run_config.json`. Have each model return its predictions and let the CLI write the artifacts once.
++- **Trim `validate` output.** It prints every filename, about 40,000 lines on the full data. Print counts, and list files only with `--verbose`.
++- **Cache loaded data.** Every command reloads all PSV files. Cache them as one parquet file keyed on the file list and modification times.
++- **Label the synthetic demo.** Its positives are separable by construction, so its metrics are near perfect. Add a banner to its report saying it is a smoke test, not a result.
++- **Record package versions.** Write `pip freeze` or the key package versions into `run_config.json`, as the design doc already recommends.
++
++## Suggested order
++
++If time is short, do 1, 2, 3 and 4 together, because they define the outcome and the operating point. Then do 5, which is cheap and gives the most informative result. Items 6 and 7 make the model comparison trustworthy. Item 8 and the item 9 fixes can follow.
+diff --git a/README.md b/README.md
+index e11dc59..4abe11c 100644
+--- a/README.md
++++ b/README.md
+@@ -60,7 +60,9 @@ Choose models with `--models logistic_regression random_forest xgboost`. Add `--
+ 
+ ## Outputs
+ 
+-- `report.html`: self-contained visual report with held-out results and charts, raw six-hour sample observations, engineered-feature sample, and pipeline/data-lineage diagrams. It embeds patient-derived values; share and store it according to dataset and institutional privacy requirements.
++- `report.html`: self-contained visual report. It opens with a methodology section generated from the run configuration, then a head-to-head model comparison (ranking with bootstrap confidence intervals, matched-sensitivity operating points, calibration and decision curves), followed by a pipeline diagram with one lane per model, the data-lineage diagram, and raw and engineered input samples. It embeds patient-derived values; share and store it according to dataset and institutional privacy requirements.
++- `model_evaluation.json` and `model_ranking.csv`: the comparison behind the report. Models are ranked by AUPRC (AUROC tie-break) with paired bootstrap 95% CIs; each model is also read at the threshold reaching 80% sensitivity on the test patients (specificity, PPV, alerts per 100 patients, alerts per true case), with calibration slope, 10-bin ECE and decision-curve net benefit. The matched-sensitivity threshold is chosen on the test set, so it compares models descriptively rather than estimating deployed performance.
++- `model_forest.png`, `calibration.png`, `decision_curve.png`: uncertainty, calibration and clinical-utility plots used in the report.
+ - `cohort_summary.json`: eligible outcome counts and exclusion counts, including records without outcome follow-up.
+ - `metrics.json`: AUROC, average precision/AUPRC, sensitivity, specificity, precision, F1, accuracy, Brier score, threshold, and confusion matrix. AUROC/AUPRC are `null` if the test split has only one class.
+ - `model_comparison.csv` and `model_curves.png`: held-out comparison table and ROC/precision-recall plots.
+@@ -78,13 +80,13 @@ Reusing the same input files, software versions, options, and random seed produc
+ 
+ ## Tests
+ 
+-Tests create temporary synthetic PSV files and do not download or require clinical data. They cover cohort timing, feature/sequence alignment, patient splitting, train-only preprocessing, reproducibility, CLI artifacts, and EDA outputs:
++Tests create temporary synthetic PSV files and do not download or require clinical data. They cover cohort timing, feature/sequence alignment, patient splitting, train-only preprocessing, reproducibility, CLI artifacts, EDA outputs, and the model-comparison statistics:
+ 
+ ```powershell
+ python -m pytest
+ ```
+ 
+-The project plan and architecture/data-flow diagram are in [docs/experimental_design.md](docs/experimental_design.md).
++The project plan and architecture/data-flow diagram are in [docs/experimental_design.md](docs/experimental_design.md). Planned methodological improvements are tracked in [IMPROVEMENTS.md](IMPROVEMENTS.md).
+ 
+ ## Clinical-Use Caveat
+ 
+diff --git a/docs/experimental_design.md b/docs/experimental_design.md
+index c388290..be9fa28 100644
+--- a/docs/experimental_design.md
++++ b/docs/experimental_design.md
+@@ -18,9 +18,10 @@ flowchart TD
+     I --> K[Train-only imputation/scaling]
+     J --> L[Logistic Regression / Random Forest / XGBoost]
+     K --> M[1D CNN, opt-in training]
+-    L --> N[Held-out predictions and metrics]
++    L --> N[Held-out predictions on shared test patients]
+     M --> N
+-    N --> O[Comparison CSV, ROC/PR plots, model artifacts]
++    N --> P[Bootstrap ranking, matched-sensitivity operating point, calibration, net benefit]
++    P --> O[report.html, model_evaluation.json, plots, model artifacts]
+ ```
+ 
+ ## Evaluation Protocol
+@@ -30,6 +31,9 @@ flowchart TD
+ - Imputation and scaling parameters are learned from training patients only. The CNN likewise estimates each input variable's median, mean, and standard deviation on training tensors only.
+ - The 0.5 threshold is fixed by default and is recorded. It is not tuned against the test set.
+ - AUROC and average precision are reported only where both outcome classes occur in the test set. Sensitivity, specificity, precision, F1, accuracy, Brier score, and confusion matrix are also saved.
++- Models are compared on the same test patients. Ranking is by AUPRC with AUROC as tie-break, with paired percentile bootstrap 95% CIs (1,000 resamples, seeded). A lower-ranked model is reported as worse only when the CI for its AUPRC difference from the top model excludes zero.
++- For alert burden, each model is read at the highest threshold reaching 80% sensitivity on the test patients. Because that threshold is selected on the test set, these figures are descriptive; a validation split is required before quoting them as expected performance (see IMPROVEMENTS.md).
++- Calibration (logistic slope, 10-bin ECE, decile curve) and decision-curve net benefit (thresholds 1–50%) are reported for every model.
+ - The CNN comparison changes both input representation and model family; a performance difference cannot be attributed to architecture alone.
+ - This is retrospective educational analysis, not a clinically validated decision-support system. Challenge utility and direct comparison with challenge submissions are not implemented.
+ 
+diff --git a/src/sepsis_prediction/cnn.py b/src/sepsis_prediction/cnn.py
+index 1178db2..177bd80 100644
+--- a/src/sepsis_prediction/cnn.py
++++ b/src/sepsis_prediction/cnn.py
+@@ -138,5 +138,17 @@ def run_cnn_experiment(
+     config = json.loads(config_path.read_text(encoding="utf-8"))
+     config["models"].append("cnn_1d")
+     config["cnn_epochs"] = epochs
++    config.setdefault("model_specs", {})["cnn_1d"] = {
++        "input": "ordered six-hour sequence (hours x variables)",
++        "preprocessing": [
++            "per-variable median imputation (train-fitted)",
++            "per-variable z-score (train-fitted)",
++        ],
++        "estimator": (
++            f"Conv1d(32,k=3) > ReLU > Conv1d(32,k=3) > ReLU > global average pool > linear; "
++            f"Adam lr=1e-3, batch 32, {epochs} epochs, no early stopping"
++        ),
++        "class_weighting": "pos_weight = negatives / positives",
++    }
+     _write_json(config_path, config)
+     return metrics
+\ No newline at end of file
+diff --git a/src/sepsis_prediction/evaluation.py b/src/sepsis_prediction/evaluation.py
+new file mode 100644
+index 0000000..e4b58e9
+--- /dev/null
++++ b/src/sepsis_prediction/evaluation.py
+@@ -0,0 +1,349 @@
++"""Held-out comparison of models for effective prediction.
++
++Everything here is computed from ``test_predictions.csv`` so that every model
++is judged on exactly the same patients. The analysis answers four questions:
++
++1. Discrimination: how well does each model rank patients who later develop
++   sepsis above those who do not (AUROC, AUPRC), with paired bootstrap 95% CIs?
++2. Distinguishability: is each model's advantage over the others larger than
++   resampling noise (paired bootstrap difference against the top model)?
++3. Operating point: at a common sensitivity, how many alerts does each model
++   raise, how many are true, and how many cases are missed per 100 patients?
++4. Calibration and clinical utility: do probabilities mean what they say, and
++   does acting on them beat treat-all / treat-none (decision-curve net benefit)?
++"""
++
++from __future__ import annotations
++
++import json
++from pathlib import Path
++from typing import Any
++
++import matplotlib
++
++matplotlib.use("Agg")
++import matplotlib.pyplot as plt
++import numpy as np
++import pandas as pd
++from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_score
++
++MODEL_LABELS = {
++    "logistic_regression": "Logistic Regression",
++    "random_forest": "Random Forest",
++    "xgboost": "XGBoost",
++    "cnn_1d": "1D CNN",
++}
++MODEL_COLORS = {
++    "logistic_regression": "#167b73",
++    "random_forest": "#477d9e",
++    "xgboost": "#d89a38",
++    "cnn_1d": "#c45042",
++}
++TARGET_SENSITIVITY = 0.80
++NET_BENEFIT_THRESHOLDS = np.round(np.arange(0.01, 0.51, 0.01), 2)
++
++
++def model_label(name: str) -> str:
++    return MODEL_LABELS.get(name, name.replace("_", " ").title())
++
++
++def model_color(name: str) -> str:
++    return MODEL_COLORS.get(name, "#536966")
++
++
++def _model_names(predictions: pd.DataFrame) -> list[str]:
++    return [
++        column.removesuffix("_probability")
++        for column in predictions.columns
++        if column.endswith("_probability")
++    ]
++
++
++def _safe_auc(y: np.ndarray, p: np.ndarray) -> float:
++    return float(roc_auc_score(y, p)) if np.unique(y).size == 2 else np.nan
++
++
++def _safe_ap(y: np.ndarray, p: np.ndarray) -> float:
++    return float(average_precision_score(y, p)) if np.unique(y).size == 2 else np.nan
++
++
++def _ci(values: np.ndarray) -> tuple[float | None, float | None]:
++    values = values[np.isfinite(values)]
++    if values.size < 20:
++        return None, None
++    low, high = np.percentile(values, [2.5, 97.5])
++    return float(low), float(high)
++
++
++def _none_if_nan(value: float) -> float | None:
++    return None if value is None or not np.isfinite(value) else float(value)
++
++
++def operating_point(y: np.ndarray, p: np.ndarray, target_sensitivity: float) -> dict[str, Any]:
++    """Highest threshold whose sensitivity reaches the target on these patients.
++
++    The threshold is chosen on the evaluation patients themselves, so this is a
++    descriptive comparison of models at matched sensitivity, not an estimate of
++    deployed performance. A validation split is required for the latter.
++    """
++    positives = int(y.sum())
++    n = int(y.size)
++    if positives == 0 or positives == n:
++        return {"threshold": None}
++    for threshold in np.unique(p)[::-1]:
++        flagged = p >= threshold
++        true_positive = int((flagged & (y == 1)).sum())
++        if true_positive / positives >= target_sensitivity:
++            false_positive = int((flagged & (y == 0)).sum())
++            negatives = n - positives
++            alerts = int(flagged.sum())
++            ppv = true_positive / alerts if alerts else np.nan
++            return {
++                "threshold": float(threshold),
++                "sensitivity": true_positive / positives,
++                "specificity": (negatives - false_positive) / negatives if negatives else np.nan,
++                "ppv": ppv,
++                "alerts_per_100": 100 * alerts / n,
++                "true_alerts_per_100": 100 * true_positive / n,
++                "missed_per_100": 100 * (positives - true_positive) / n,
++                "alerts_per_true_case": 1 / ppv if ppv and np.isfinite(ppv) else np.nan,
++            }
++    return {"threshold": None}
++
++
++def calibration_summary(y: np.ndarray, p: np.ndarray) -> dict[str, float | None]:
++    """Calibration-in-the-large, logistic calibration slope, and 10-bin ECE."""
++    clipped = np.clip(p, 1e-6, 1 - 1e-6)
++    logit = np.log(clipped / (1 - clipped))
++    slope = intercept = np.nan
++    if np.unique(y).size == 2 and np.std(logit) > 0:
++        from sklearn.linear_model import LogisticRegression
++
++        fitted = LogisticRegression(C=1e6, max_iter=1000).fit(logit[:, None], y)
++        slope = float(fitted.coef_[0][0])
++        intercept = float(fitted.intercept_[0])
++    edges = np.linspace(0, 1, 11)
++    bins = np.clip(np.digitize(p, edges[1:-1]), 0, 9)
++    ece = 0.0
++    for b in range(10):
++        mask = bins == b
++        if mask.any():
++            ece += mask.mean() * abs(p[mask].mean() - y[mask].mean())
++    return {
++        "mean_predicted": float(p.mean()),
++        "observed_rate": float(y.mean()),
++        "calibration_slope": _none_if_nan(slope),
++        "calibration_intercept": _none_if_nan(intercept),
++        "ece_10_bin": float(ece),
++    }
++
++
++def net_benefit(y: np.ndarray, p: np.ndarray, thresholds: np.ndarray) -> np.ndarray:
++    n = y.size
++    out = []
++    for t in thresholds:
++        flagged = p >= t
++        tp = np.sum(flagged & (y == 1))
++        fp = np.sum(flagged & (y == 0))
++        out.append(tp / n - fp / n * (t / (1 - t)))
++    return np.asarray(out)
++
++
++def compare_models(
++    output_dir: str | Path,
++    *,
++    n_bootstrap: int = 1000,
++    random_state: int = 42,
++    target_sensitivity: float = TARGET_SENSITIVITY,
++) -> dict[str, Any]:
++    """Compute the effective-prediction comparison and write JSON/CSV/PNG outputs."""
++    output = Path(output_dir)
++    predictions = pd.read_csv(output / "test_predictions.csv")
++    names = _model_names(predictions)
++    y = predictions["y_true"].to_numpy(dtype=int)
++    probs = {name: predictions[f"{name}_probability"].to_numpy(dtype=float) for name in names}
++    both_classes = np.unique(y).size == 2
++
++    rng = np.random.default_rng(random_state)
++    n = y.size
++    boot_auc = {name: np.full(n_bootstrap, np.nan) for name in names}
++    boot_ap = {name: np.full(n_bootstrap, np.nan) for name in names}
++    boot_brier = {name: np.full(n_bootstrap, np.nan) for name in names}
++    if both_classes:
++        for b in range(n_bootstrap):
++            idx = rng.integers(0, n, n)
++            yb = y[idx]
++            if np.unique(yb).size < 2:
++                continue
++            for name in names:
++                pb = probs[name][idx]
++                boot_auc[name][b] = _safe_auc(yb, pb)
++                boot_ap[name][b] = _safe_ap(yb, pb)
++                boot_brier[name][b] = brier_score_loss(yb, pb)
++
++    rows: list[dict[str, Any]] = []
++    for name in names:
++        p = probs[name]
++        auc_low, auc_high = _ci(boot_auc[name])
++        ap_low, ap_high = _ci(boot_ap[name])
++        brier_low, brier_high = _ci(boot_brier[name])
++        rows.append({
++            "model": name,
++            "label": model_label(name),
++            "auroc": _none_if_nan(_safe_auc(y, p)),
++            "auroc_ci": [auc_low, auc_high],
++            "auprc": _none_if_nan(_safe_ap(y, p)),
++            "auprc_ci": [ap_low, ap_high],
++            "auprc_lift": _none_if_nan(_safe_ap(y, p) / y.mean()) if y.mean() > 0 else None,
++            "brier": float(brier_score_loss(y, p)),
++            "brier_ci": [brier_low, brier_high],
++            "operating_point": {k: _none_if_nan(v) if isinstance(v, float) else v
++                                for k, v in operating_point(y, p, target_sensitivity).items()},
++            "calibration": calibration_summary(y, p),
++        })
++
++    # Rank by AUPRC (primary under class imbalance), AUROC as tie-break.
++    rows.sort(key=lambda r: (r["auprc"] if r["auprc"] is not None else -1,
++                             r["auroc"] if r["auroc"] is not None else -1), reverse=True)
++    for rank, row in enumerate(rows, start=1):
++        row["rank"] = rank
++
++    best = rows[0]["model"] if rows else None
++    for row in rows:
++        name = row["model"]
++        if name == best or not both_classes:
++            row["vs_best"] = None
++            continue
++        diff_ap = boot_ap[best] - boot_ap[name]
++        diff_auc = boot_auc[best] - boot_auc[name]
++        ap_low, ap_high = _ci(diff_ap)
++        auc_low, auc_high = _ci(diff_auc)
++        finite = diff_ap[np.isfinite(diff_ap)]
++        row["vs_best"] = {
++            "best_model": best,
++            "auprc_difference": _none_if_nan(rows[0]["auprc"] - row["auprc"])
++            if rows[0]["auprc"] is not None and row["auprc"] is not None else None,
++            "auprc_difference_ci": [ap_low, ap_high],
++            "auroc_difference_ci": [auc_low, auc_high],
++            "share_of_resamples_best_wins": float((finite > 0).mean()) if finite.size else None,
++            "distinguishable": bool(ap_low is not None and ap_low > 0),
++            "auroc_distinguishable": bool(auc_low is not None and auc_low > 0),
++        }
++
++    thresholds = NET_BENEFIT_THRESHOLDS
++    prevalence = float(y.mean()) if n else 0.0
++    decision = {
++        "thresholds": thresholds.tolist(),
++        "treat_all": (prevalence - (1 - prevalence) * thresholds / (1 - thresholds)).tolist(),
++        "models": {name: net_benefit(y, probs[name], thresholds).tolist() for name in names},
++    }
++
++    result = {
++        "n_test": int(n),
++        "positives": int(y.sum()),
++        "prevalence": prevalence,
++        "n_bootstrap": n_bootstrap,
++        "bootstrap_seed": random_state,
++        "target_sensitivity": target_sensitivity,
++        "ranking_rule": "AUPRC (primary, class-imbalance aware), AUROC tie-break",
++        "best_model": best,
++        "models": rows,
++        "decision_curve": decision,
++    }
++    (output / "model_evaluation.json").write_text(
++        json.dumps(result, indent=2, allow_nan=False) + "\n", encoding="utf-8",
++    )
++    _flat_table(rows).to_csv(output / "model_ranking.csv", index=False, float_format="%.6g")
++    _plot_calibration(output, y, probs)
++    _plot_decision_curve(output, decision)
++    _plot_forest(output, rows)
++    return result
++
++
++def _flat_table(rows: list[dict[str, Any]]) -> pd.DataFrame:
++    flat = []
++    for row in rows:
++        op = row["operating_point"]
++        cal = row["calibration"]
++        flat.append({
++            "rank": row["rank"],
++            "model": row["model"],
++            "auprc": row["auprc"],
++            "auprc_ci_low": row["auprc_ci"][0],
++            "auprc_ci_high": row["auprc_ci"][1],
++            "auroc": row["auroc"],
++            "auroc_ci_low": row["auroc_ci"][0],
++            "auroc_ci_high": row["auroc_ci"][1],
++            "brier": row["brier"],
++            "calibration_slope": cal["calibration_slope"],
++            "ece_10_bin": cal["ece_10_bin"],
++            "op_threshold": op.get("threshold"),
++            "op_specificity": op.get("specificity"),
++            "op_ppv": op.get("ppv"),
++            "op_alerts_per_100": op.get("alerts_per_100"),
++            "op_alerts_per_true_case": op.get("alerts_per_true_case"),
++        })
++    return pd.DataFrame(flat)
++
++
++def _plot_calibration(output: Path, y: np.ndarray, probs: dict[str, np.ndarray]) -> None:
++    figure, axis = plt.subplots(figsize=(5.6, 4.6))
++    axis.plot([0, 1], [0, 1], color="#777777", linestyle="--", linewidth=1, label="Perfect calibration")
++    for name, p in probs.items():
++        quantiles = np.unique(np.quantile(p, np.linspace(0, 1, 11)))
++        if quantiles.size < 2:
++            continue
++        bins = np.clip(np.digitize(p, quantiles[1:-1]), 0, quantiles.size - 2)
++        xs, ys = [], []
++        for b in range(quantiles.size - 1):
++            mask = bins == b
++            if mask.sum() >= 1:
++                xs.append(p[mask].mean())
++                ys.append(y[mask].mean())
++        axis.plot(xs, ys, marker="o", markersize=4, linewidth=1.6, color=model_color(name), label=model_label(name))
++    axis.set(xlim=(0, 1), ylim=(0, 1), xlabel="Mean predicted risk (decile)", ylabel="Observed sepsis rate",
++             title="Calibration")
++    axis.legend(frameon=False, fontsize=8, loc="upper left")
++    figure.tight_layout()
++    figure.savefig(output / "calibration.png", dpi=160)
++    plt.close(figure)
++
++
++def _plot_decision_curve(output: Path, decision: dict[str, Any]) -> None:
++    thresholds = np.asarray(decision["thresholds"])
++    figure, axis = plt.subplots(figsize=(5.6, 4.6))
++    axis.plot(thresholds, decision["treat_all"], color="#999999", linewidth=1.2, label="Alert everyone")
++    axis.axhline(0, color="#444444", linewidth=1, label="Alert no one")
++    top = 0.0
++    for name, values in decision["models"].items():
++        axis.plot(thresholds, values, linewidth=1.8, color=model_color(name), label=model_label(name))
++        top = max(top, max(values))
++    top = max(top, max(decision["treat_all"]), 0.01)
++    axis.set(xlim=(0, thresholds.max()), ylim=(-top * 0.25, top * 1.15), xlabel="Risk threshold for alerting",
++             ylabel="Net benefit", title="Decision curve")
++    axis.legend(frameon=False, fontsize=8)
++    figure.tight_layout()
++    figure.savefig(output / "decision_curve.png", dpi=160)
++    plt.close(figure)
++
++
++def _plot_forest(output: Path, rows: list[dict[str, Any]]) -> None:
++    figure, axes = plt.subplots(1, 2, figsize=(10, 0.6 * max(len(rows), 2) + 1.6), sharey=True)
++    labels = [model_label(r["model"]) for r in rows][::-1]
++    for axis, key, title in ((axes[0], "auprc", "AUPRC (95% CI)"), (axes[1], "auroc", "AUROC (95% CI)")):
++        for position, row in enumerate(rows[::-1]):
++            value = row[key]
++            low, high = row[f"{key}_ci"]
++            if value is None:
++                continue
++            color = model_color(row["model"])
++            if low is not None and high is not None:
++                axis.plot([low, high], [position, position], color=color, linewidth=2.4)
++            axis.plot(value, position, "o", color=color, markersize=7)
++        axis.set_title(title, fontsize=11)
++        axis.set_xlim(0, 1)
++        axis.grid(axis="x", color="#e3e7e4")
++    axes[0].set_yticks(range(len(labels)), labels)
++    figure.tight_layout()
++    figure.savefig(output / "model_forest.png", dpi=160)
++    plt.close(figure)
+diff --git a/src/sepsis_prediction/modeling.py b/src/sepsis_prediction/modeling.py
+index d97aec6..ff9cb5d 100644
+--- a/src/sepsis_prediction/modeling.py
++++ b/src/sepsis_prediction/modeling.py
+@@ -40,6 +40,29 @@ DESIGN = {
+     "split_unit": "patient",
+ }
+ 
++# Human-readable record of each model's preprocessing and estimator settings.
++# Kept beside make_pipeline so the report's methodology matches the code.
++MODEL_SPECS = {
++    "logistic_regression": {
++        "input": "engineered tabular features",
++        "preprocessing": ["median imputation (train-fitted)", "standardisation (train-fitted)"],
++        "estimator": "L2 logistic regression, class_weight=balanced, max_iter=2000",
++        "class_weighting": "balanced",
++    },
++    "random_forest": {
++        "input": "engineered tabular features",
++        "preprocessing": ["median imputation (train-fitted)"],
++        "estimator": "300 trees, class_weight=balanced_subsample, default depth",
++        "class_weighting": "balanced_subsample",
++    },
++    "xgboost": {
++        "input": "engineered tabular features",
++        "preprocessing": ["median imputation (train-fitted)"],
++        "estimator": "300 boosted trees, max_depth=4, learning_rate=0.05, subsample=0.8, colsample_bytree=0.8",
++        "class_weighting": "none",
++    },
++}
++
+ 
+ def make_pipeline(model_name: str, feature_names: list[str], random_state: int) -> Pipeline:
+     """Create a model with all learned preprocessing inside its sklearn pipeline."""
+@@ -206,6 +229,7 @@ def run_experiment(
+     _write_json(output / "run_config.json", {
+         "design": DESIGN,
+         "models": list(models),
++        "model_specs": {name: MODEL_SPECS[name] for name in models},
+         "random_state": random_state,
+         "test_size": test_size,
+         "threshold": threshold,
+diff --git a/src/sepsis_prediction/reporting.py b/src/sepsis_prediction/reporting.py
+index bd81eda..696de31 100644
+--- a/src/sepsis_prediction/reporting.py
++++ b/src/sepsis_prediction/reporting.py
+@@ -12,10 +12,12 @@ import matplotlib
+ 
+ matplotlib.use("Agg")
+ import matplotlib.pyplot as plt
++import numpy as np
+ import pandas as pd
+ from sklearn.metrics import precision_recall_curve, roc_curve
+ 
+-from sepsis_prediction.data import TARGET_COLUMN, PatientRecord
++from sepsis_prediction.data import KNOWN_CLINICAL_COLUMNS, TARGET_COLUMN, PatientRecord
++from sepsis_prediction.evaluation import compare_models, model_color, model_label
+ 
+ 
+ def write_model_comparison(output_dir: str | Path) -> pd.DataFrame:
+@@ -52,10 +54,13 @@ def write_model_comparison(output_dir: str | Path) -> pd.DataFrame:
+             probabilities = predictions[f"{model_name}_probability"].to_numpy()
+             false_positive_rate, true_positive_rate, _ = roc_curve(labels, probabilities)
+             precision, recall, _ = precision_recall_curve(labels, probabilities)
+-            axes[0].plot(false_positive_rate, true_positive_rate, label=model_name)
+-            axes[1].plot(recall, precision, label=model_name)
++            axes[0].plot(false_positive_rate, true_positive_rate, label=model_label(model_name),
++                         color=model_color(model_name), linewidth=1.6)
++            axes[1].plot(recall, precision, label=model_label(model_name),
++                         color=model_color(model_name), linewidth=1.6)
+         axes[0].plot([0, 1], [0, 1], color="#777777", linestyle="--", linewidth=1)
+         axes[0].set(xlabel="False positive rate", ylabel="True positive rate", title="ROC")
++        axes[1].axhline(labels.mean(), color="#777777", linestyle="--", linewidth=1, label="Base rate")
+         axes[1].set(xlabel="Recall", ylabel="Precision", title="Precision-recall")
+         axes[0].legend(loc="lower right", frameon=False)
+         axes[1].legend(loc="best", frameon=False)
+@@ -67,6 +72,8 @@ def write_model_comparison(output_dir: str | Path) -> pd.DataFrame:
+     figure.tight_layout()
+     figure.savefig(output / "model_curves.png", dpi=160)
+     plt.close(figure)
++    config = _read_json(output / "run_config.json", {})
++    compare_models(output, random_state=int(config.get("random_state", 42)))
+     return table
+ 
+ 
+@@ -101,6 +108,9 @@ def write_html_report(
+     feature_html = _render_feature_sample(features)
+     charts_html = _render_charts(output, metrics)
+     diagrams_html = _render_diagrams(config)
++    evaluation = _read_json(output / "model_evaluation.json", {})
++    methodology_html = _render_methodology(config, cohort, evaluation, features)
++    effective_html = _render_effective(output, evaluation)
+     generated_at = pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%d %H:%M UTC")
+ 
+     document = f"""<!doctype html>
+@@ -124,6 +134,11 @@ section {{ padding:22px 0 26px; border-top:1px solid var(--line); }} h2 {{ margi
+ .panel {{ min-width:0; padding:16px; background:var(--white); border:1px solid var(--line); }} .panel img {{ display:block; width:100%; height:auto; }}
+ .table-wrap {{ width:100%; overflow-x:auto; border:1px solid var(--line); background:var(--white); }} table {{ width:100%; border-collapse:collapse; font-size:13px; white-space:nowrap; }} th,td {{ padding:9px 11px; text-align:left; border-bottom:1px solid #e6eae7; }} th {{ position:sticky; top:0; color:#35504d; background:#edf2ee; font-weight:700; }} tbody tr:nth-child(even) {{ background:#f8faf8; }}
+ .diagram {{ overflow-x:auto; padding:12px; background:#fff; border:1px solid var(--line); }} svg {{ display:block; max-width:100%; height:auto; }} .diagram-label {{ color:var(--muted); font-size:13px; margin:0 0 8px; }}
++.muted {{ color:var(--muted); font-size:12px; }} .prose {{ max-width:78ch; }} .prose p {{ margin:0 0 12px; }} .prose ul {{ margin:0 0 12px; padding-left:20px; }} .prose li {{ margin-bottom:5px; }}
++.verdict {{ padding:16px 18px; margin-bottom:18px; background:var(--white); border-left:5px solid var(--teal); }} .verdict p {{ margin:0 0 6px; max-width:90ch; }} .verdict .caution {{ color:var(--coral); }}
++.rank-table td:first-child {{ font-weight:700; }} .rank-table td:last-child {{ white-space:normal; min-width:170px; }} .panel.wide {{ grid-column:1 / -1; }} .panel.wide img {{ max-width:860px; }} .rank-table th {{ white-space:normal; vertical-align:bottom; }} .swatch {{ display:inline-block; width:10px; height:10px; margin-right:7px; border-radius:2px; vertical-align:middle; }}
++details.detail {{ margin:18px 0; padding:12px 16px; background:var(--white); border:1px solid var(--line); }} details.detail summary {{ cursor:pointer; font-weight:700; }} details.detail[open] summary {{ margin-bottom:12px; }}
++.method-grid.prose {{ max-width:none; }} .method-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr)); gap:16px 28px; }}
+ .empty {{ color:var(--muted); padding:12px 0; }} .footer {{ border-top:1px solid var(--line); padding:18px 0; color:var(--muted); font-size:12px; }}
+ @media(max-width:600px) {{ main {{ padding:18px; }} .masthead {{ padding:22px 18px; }} h1 {{ font-size:30px; }} .panel {{ padding:12px; }} th,td {{ padding:8px; }} }}
+ @media print {{ body {{ background:white; }} .masthead {{ print-color-adjust:exact; }} section {{ break-inside:avoid; }} }}
+@@ -134,7 +149,8 @@ section {{ padding:22px 0 26px; border-top:1px solid var(--line); }} h2 {{ margi
+ <main>
+ <div class="notice"><strong>Research use only.</strong> Retrospective modelling results are not clinically validated. This report may contain patient-derived clinical values; handle and share it according to the dataset terms and your institution's privacy requirements.</div>
+ {cohort_html}
+-<section><h2>Model results</h2>{metrics_html}<div class="chart-grid">{charts_html}</div>{comparison_html}</section>
++{methodology_html}
++<section><h2>Model results</h2>{effective_html}<details class="detail"><summary>Per-model metrics at the fixed {html.escape(str(config.get("threshold", 0.5)))} threshold</summary><p class="diagram-label">These depend on each model's class weighting, so they are not a like-for-like comparison. Use the matched-sensitivity table above to compare models.</p>{metrics_html}{comparison_html}</details><div class="chart-grid">{charts_html}</div></section>
+ <section><h2>Pipeline and data lineage</h2>{diagrams_html}</section>
+ <section><h2>Sample of source observations</h2><p class="diagram-label">First six rows only, matching the model input window; identifiers are replaced with report-local labels.</p>{sample_html}</section>
+ <section><h2>Sample engineered inputs</h2><p class="diagram-label">Descriptive feature values from the same fixed look-back, where available.</p>{feature_html}</section>
+@@ -222,38 +238,289 @@ def _render_charts(output: Path, metrics: dict[str, dict[str, Any]]) -> str:
+         if image_path.exists():
+             encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
+             sections.append(f'<div class="panel"><h3>{heading}</h3><img alt="{alt}" src="data:image/png;base64,{encoded}"></div>')
+-    if metrics:
+-        metric_names = ("auroc", "auprc_average_precision", "sensitivity_recall", "specificity", "f1")
+-        rows = []
+-        for name, values in metrics.items():
+-            cells = []
+-            for metric in metric_names:
+-                value = values.get(metric)
+-                percent = 0 if value is None else max(0, min(1, float(value))) * 100
+-                cells.append(f'<div class="bar-track" title="{html.escape(metric)}: {_format_value(value)}"><span style="width:{percent:.1f}%;background:{_color_for_metric(metric)}"></span></div>')
+-            rows.append(f'<div class="metric-row"><strong>{html.escape(name)}</strong>{"".join(cells)}</div>')
+-        headers = "".join(f"<span>{metric.replace('_', ' ')}</span>" for metric in metric_names)
+-        sections.append(f'<div class="panel"><h3>Metric profile</h3><div class="metric-header"><span>Model</span>{headers}</div>{"".join(rows)}<p class="diagram-label">Bar length is scaled from 0 to 1; Brier score is shown in the result cards and table.</p></div>')
+     if not sections:
+         return '<div class="panel empty">Run an experiment to generate result charts.</div>'
+     return '<style>.metric-header,.metric-row{display:grid;grid-template-columns:130px repeat(5,minmax(62px,1fr));gap:8px;align-items:center;margin:9px 0;font-size:11px}.metric-header{color:#52605f;text-transform:capitalize}.metric-row strong{font-size:12px}.bar-track{height:10px;background:#e9eeeb;border-radius:2px;overflow:hidden}.bar-track span{display:block;height:100%;border-radius:2px}</style>' + "".join(sections)
+ 
+ 
+-def _color_for_metric(metric: str) -> str:
+-    colors = {"auroc": "#167b73", "auprc_average_precision": "#477d9e", "sensitivity_recall": "#c45042", "specificity": "#d89a38", "f1": "#745d92"}
+-    return colors[metric]
++def _fmt(value: Any, digits: int = 3) -> str:
++    if value is None:
++        return "—"
++    try:
++        number = float(value)
++    except (TypeError, ValueError):
++        return "—"
++    if not np.isfinite(number):
++        return "—"
++    return f"{number:.{digits}f}"
++
++
++def _fmt_ci(value: Any, ci: list[Any] | None) -> str:
++    if value is None:
++        return "—"
++    if not ci or ci[0] is None or ci[1] is None:
++        return _fmt(value)
++    return f'{_fmt(value)} <span class="muted">({_fmt(ci[0])}–{_fmt(ci[1])})</span>'
++
++
++def _embed_png(path: Path, heading: str, alt: str, note: str = "", wide: bool = False) -> str:
++    if not path.exists():
++        return ""
++    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
++    note_html = f'<p class="diagram-label">{note}</p>' if note else ""
++    panel_class = "panel wide" if wide else "panel"
++    return (f'<div class="{panel_class}"><h3>{html.escape(heading)}</h3>'
++            f'<img alt="{html.escape(alt)}" src="data:image/png;base64,{encoded}">{note_html}</div>')
++
++
++def _join_names(names: list[str]) -> str:
++    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
++
++
++def _render_effective(output: Path, evaluation: dict[str, Any]) -> str:
++    """Head-to-head comparison of models for effective prediction."""
++    rows = evaluation.get("models", [])
++    if not rows:
++        return '<p class="empty">Train at least one model to generate the comparison.</p>'
++    target = float(evaluation.get("target_sensitivity", 0.8))
++    positives = int(evaluation.get("positives", 0))
++    prevalence = float(evaluation.get("prevalence", 0.0))
++    best = rows[0]
++
++    # Plain-language verdict.
++    lines = [
++        f'<p><strong>{html.escape(model_label(best["model"]))}</strong> ranks first on AUPRC '
++        f'({_fmt(best["auprc"])}, {_fmt(best.get("auprc_lift"), 1)}× the {prevalence:.1%} base rate) '
++        f'with AUROC {_fmt(best["auroc"])}.</p>'
++    ]
++    if len(rows) > 1:
++        compared = [r for r in rows[1:] if r.get("vs_best")]
++        both = [model_label(r["model"]) for r in compared
++                if r["vs_best"]["distinguishable"] and r["vs_best"].get("auroc_distinguishable")]
++        auprc_only = [model_label(r["model"]) for r in compared
++                      if r["vs_best"]["distinguishable"] and not r["vs_best"].get("auroc_distinguishable")]
++        close = [model_label(r["model"]) for r in compared if not r["vs_best"]["distinguishable"]]
++        if both:
++            lines.append(f'<p>It is better than {html.escape(_join_names(both))} on both AUPRC and AUROC, '
++                         'beyond resampling noise.</p>')
++        if auprc_only:
++            lines.append(f'<p>Against {html.escape(_join_names(auprc_only))} its AUPRC advantage exceeds resampling noise '
++                         'but AUROC does not separate them, so the gain is in precision among the highest-risk patients '
++                         'rather than in overall ranking.</p>')
++        if close:
++            lines.append(f'<p>It cannot be separated from {html.escape(_join_names(close))}: the 95% interval for the '
++                         'AUPRC difference includes zero, so treat these as equivalent on this test set.</p>')
++    op = best.get("operating_point", {})
++    if op.get("threshold") is not None:
++        lines.append(
++            f'<p>At {target:.0%} sensitivity it raises {_fmt(op.get("alerts_per_100"), 1)} alerts per 100 patients, '
++            f'about {_fmt(op.get("alerts_per_true_case"), 1)} alerts for every true future case, '
++            f'and misses {_fmt(op.get("missed_per_100"), 1)} cases per 100 patients.</p>'
++        )
++    if positives < 30:
++        lines.append(f'<p class="caution">Only {positives} positive patients are in the test set. '
++                     'Intervals are wide and rankings may change with a different split.</p>')
++    verdict = '<div class="verdict">' + "".join(lines) + "</div>"
++
++    # Ranking table.
++    header = ("<tr><th>Rank</th><th>Model</th><th>AUPRC (95% CI)</th><th>AUROC (95% CI)</th><th>Brier</th>"
++              "<th>Calibration slope</th>"
++              f"<th>Specificity at {target:.0%} sens.</th><th>PPV</th><th>Alerts / 100</th>"
++              "<th>Alerts per true case</th><th>Versus top model</th></tr>")
++    body = []
++    for row in rows:
++        op = row.get("operating_point", {})
++        cal = row.get("calibration", {})
++        vs = row.get("vs_best")
++        if vs is None:
++            versus = "Top ranked" if row["rank"] == 1 else "—"
++        else:
++            share = vs.get("share_of_resamples_best_wins")
++            if vs["distinguishable"] and vs.get("auroc_distinguishable"):
++                verdict_text = "Worse on AUPRC and AUROC"
++            elif vs["distinguishable"]:
++                verdict_text = "Worse on AUPRC only"
++            else:
++                verdict_text = "Not separable"
++            versus = verdict_text + (
++                f'; top wins {share:.0%} of resamples' if share is not None else "")
++        body.append(
++            "<tr>"
++            f'<td>{row["rank"]}</td>'
++            f'<td><span class="swatch" style="background:{model_color(row["model"])}"></span>{html.escape(model_label(row["model"]))}</td>'
++            f'<td>{_fmt_ci(row["auprc"], row.get("auprc_ci"))}</td>'
++            f'<td>{_fmt_ci(row["auroc"], row.get("auroc_ci"))}</td>'
++            f'<td>{_fmt(row["brier"])}</td>'
++            f'<td>{_fmt(cal.get("calibration_slope"), 2)}</td>'
++            f'<td>{_fmt(op.get("specificity"))}</td>'
++            f'<td>{_fmt(op.get("ppv"))}</td>'
++            f'<td>{_fmt(op.get("alerts_per_100"), 1)}</td>'
++            f'<td>{_fmt(op.get("alerts_per_true_case"), 1)}</td>'
++            f"<td>{html.escape(versus)}</td>"
++            "</tr>"
++        )
++    table = ('<h3>Head-to-head ranking</h3><div class="table-wrap"><table class="rank-table">'
++             f"<thead>{header}</thead><tbody>{''.join(body)}</tbody></table></div>"
++             f'<p class="diagram-label">Ranked by AUPRC, the more informative discrimination metric when sepsis is rare; '
++             f'AUROC breaks ties. Intervals are paired percentile bootstraps over the same test patients '
++             f'({evaluation.get("n_bootstrap", "—")} resamples). Operating-point columns use, for each model, the highest '
++             f'threshold reaching {target:.0%} sensitivity on these test patients, so models are compared at matched sensitivity; '
++             'because that threshold is chosen on the test set it describes the models rather than predicting deployed performance. '
++             'A calibration slope near 1 means predicted risks are neither over- nor under-confident.</p>')
++
++    charts = "".join([
++        _embed_png(output / "model_forest.png", "Discrimination with uncertainty", "Forest plot of AUPRC and AUROC with 95% intervals", wide=True),
++        _embed_png(output / "calibration.png", "Calibration", "Calibration curves by model",
++                   "Points below the diagonal mean the model over-states risk. Class-weighted models are expected to sit below it."),
++        _embed_png(output / "decision_curve.png", "Clinical utility", "Decision curve net benefit by model",
++                   "Net benefit counts true alerts minus false alerts, weighted by how many false alerts are acceptable per true one at each threshold. A model is only useful where its curve sits above both reference lines."),
++    ])
++    return verdict + table + f'<div class="chart-grid" style="margin-top:16px">{charts}</div>'
++
++
++def _render_methodology(
++    config: dict[str, Any],
++    cohort: dict[str, Any],
++    evaluation: dict[str, Any],
++    features: pd.DataFrame | None,
++) -> str:
++    if not config:
++        return ""
++    specs = config.get("model_specs", {})
++    n_features = features.shape[1] if features is not None else len(KNOWN_CLINICAL_COLUMNS) * 8
++    exclusions = cohort.get("exclusions", {})
++    excluded_text = ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in exclusions.items()) or "none recorded"
++    model_rows = "".join(
++        "<tr>"
++        f'<td><span class="swatch" style="background:{model_color(name)}"></span>{html.escape(model_label(name))}</td>'
++        f'<td>{html.escape(spec.get("input", "—"))}</td>'
++        f'<td>{html.escape("; ".join(spec.get("preprocessing", [])))}</td>'
++        f'<td style="white-space:normal;min-width:260px">{html.escape(spec.get("estimator", "—"))}</td>'
++        f'<td>{html.escape(spec.get("class_weighting", "—"))}</td>'
++        "</tr>"
++        for name, spec in specs.items()
++    )
++    target = float(evaluation.get("target_sensitivity", 0.8)) if evaluation else 0.8
++    return f'''<section><h2>Methodology</h2><div class="method-grid prose">
++<div><h3>Data and cohort</h3>
++<p>Source data are hourly ICU records from the PhysioNet/Computing in Cardiology Challenge 2019, one pipe-separated file per patient. Rows are read in file order as consecutive ICU hours.</p>
++<p>Each patient contributes one prediction made at the end of hour 5. Inputs are rows 0–5 only. The outcome is any positive SepsisLabel from row 6 onward. In this dataset the label is already shifted to switch on six hours before the Sepsis-3 onset time, so a positive outcome corresponds to onset at roughly hour 12 or later, and patients with earlier onset are excluded as already labelled in the look-back.</p>
++<p>Eligible patients: {html.escape(str(cohort.get("eligible_patients", "—")))}, of whom {html.escape(str(cohort.get("positive_outcomes", "—")))} have a positive outcome. Excluded: {html.escape(excluded_text)}.</p>
++<p>The outcome window runs to the end of each record, so it is longer for patients who stay longer. See the improvement plan for a fixed-horizon alternative.</p></div>
++<div><h3>Features and representations</h3>
++<p>Tabular models receive {n_features} engineered features: for each of {len(KNOWN_CLINICAL_COLUMNS)} clinical and demographic variables, the latest observed value, mean, minimum, maximum, standard deviation, first-to-last change, fraction of hours missing, and an any-missing flag.</p>
++<p>The 1D CNN receives the same six hours as an ordered hours × variables tensor without summary statistics or missingness flags. A difference between the CNN and the tabular models therefore reflects both the representation and the model family.</p>
++<p>SepsisLabel, the patient identifier and ICULOS are never inputs.</p></div>
++<div><h3>Splitting and preprocessing</h3>
++<p>Patients are split once into training ({html.escape(str(config.get("n_train", "—")))}) and held-out test ({html.escape(str(config.get("n_test", "—")))}) groups with seed {html.escape(str(config.get("random_state", "—")))} and test fraction {html.escape(str(config.get("test_size", "—")))}. Every model is scored on the same test patients.</p>
++<p>Imputation and scaling are learned from training patients only and then applied unchanged to test patients. No hyperparameters were tuned, and no validation split was used.</p></div>
++<div><h3>Evaluation</h3>
++<p>Models are ranked by AUPRC, with AUROC as a tie-break. Uncertainty comes from {html.escape(str(evaluation.get("n_bootstrap", 1000)))} paired bootstrap resamples of the test patients. A model is called worse than the top model only when the 95% interval of the AUPRC difference excludes zero.</p>
++<p>To compare alert burden fairly, each model is also read at the threshold that reaches {target:.0%} sensitivity, reporting specificity, PPV and alerts per 100 patients. Calibration is summarised by the logistic calibration slope and a 10-bin calibration curve, and clinical utility by decision-curve net benefit across alert thresholds from 1% to 50%.</p></div>
++</div>
++<h3 style="margin-top:12px">Models compared</h3><div class="table-wrap"><table><thead><tr><th>Model</th><th>Input</th><th>Preprocessing</th><th>Estimator</th><th>Class weighting</th></tr></thead><tbody>{model_rows}</tbody></table></div>
++<p class="diagram-label">This is a retrospective, single-split educational analysis. It is not validated for clinical use.</p></section>'''
++
++
++ALL_MODELS = ("logistic_regression", "random_forest", "xgboost", "cnn_1d")
++DEFAULT_LANE_TEXT = {
++    "logistic_regression": (["Median impute", "Standardise"], "L2, balanced weights"),
++    "random_forest": (["Median impute"], "300 trees, balanced"),
++    "xgboost": (["Median impute"], "300 trees, depth 4, unweighted"),
++    "cnn_1d": (["Variable median impute", "Variable z-score"], "2 conv layers, pos_weight"),
++}
++
++
++def _svg_box(x: float, y: float, w: float, h: float, lines: list[str], *, fill: str, stroke: str,
++             bold_first: bool = False, dashed: bool = False, text_color: str = "#1c2727", size: int = 13) -> str:
++    dash = ' stroke-dasharray="6 4"' if dashed else ""
++    parts = [f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="5" fill="{fill}" stroke="{stroke}" stroke-width="2"{dash}/>']
++    line_height = size + 5
++    start = y + h / 2 - (len(lines) - 1) * line_height / 2 + size * 0.35
++    for index, line in enumerate(lines):
++        weight = ' font-weight="700"' if bold_first and index == 0 else ""
++        parts.append(f'<text x="{x + w / 2}" y="{start + index * line_height:.1f}" fill="{text_color}" font-size="{size}"{weight}>{html.escape(line)}</text>')
++    return "".join(parts)
+ 
+ 
+ def _render_diagrams(config: dict[str, Any]) -> str:
+     design = config.get("design", {})
+-    models = config.get("models", ["Logistic Regression", "Random Forest", "XGBoost"])
+-    if "cnn_1d" in models:
+-        model_label = "Tabular models + 1D CNN"
+-    else:
+-        model_label = " / ".join(str(model).replace("_", " ").title() for model in models)
+-    pipeline = f'''<div class="diagram"><p class="diagram-label">Model pipeline · train-only transforms applied after patient-level split</p><svg viewBox="0 0 1040 180" role="img" aria-label="Model pipeline diagram"><defs><marker id="arrow" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#536966"/></marker></defs><g font-family="Segoe UI, sans-serif" font-size="14" text-anchor="middle"><g fill="#e6f1ed" stroke="#167b73" stroke-width="2"><rect x="14" y="48" width="145" height="76" rx="5"/><rect x="198" y="48" width="145" height="76" rx="5"/><rect x="382" y="48" width="145" height="76" rx="5"/><rect x="566" y="48" width="145" height="76" rx="5"/><rect x="750" y="48" width="145" height="76" rx="5"/></g><g fill="#1c2727"><text x="86" y="78"><tspan>Patient PSV</tspan><tspan x="86" dy="20">hourly records</tspan></text><text x="270" y="78"><tspan>Rows 0–5</tspan><tspan x="270" dy="20">fixed look-back</tspan></text><text x="454" y="78"><tspan>Patient-level</tspan><tspan x="454" dy="20">train/test split</tspan></text><text x="638" y="78"><tspan>Train-only</tspan><tspan x="638" dy="20">imputation/scale</tspan></text><text x="822" y="78"><tspan>Fit models</tspan><tspan x="822" dy="20">and score</tspan></text></g><path d="M160 86 H190 M344 86 H374 M528 86 H558 M712 86 H742" fill="none" stroke="#536966" stroke-width="2" marker-end="url(#arrow)"/><text x="966" y="75" fill="#1c2727">Held-out</text><text x="966" y="96" fill="#1c2727">metrics</text><path d="M896 86 H932" fill="none" stroke="#536966" stroke-width="2" marker-end="url(#arrow)"/><text x="520" y="158" fill="#52605f">{html.escape(model_label)} · six-hour input, post-hour-5 outcome</text></g></svg></div>'''
+-    lineage = '''<div class="diagram"><p class="diagram-label">Data lineage · predictors and target come from disjoint time ranges</p><svg viewBox="0 0 1040 190" role="img" aria-label="Data lineage diagram"><defs><marker id="arrow2" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#536966"/></marker></defs><g font-family="Segoe UI, sans-serif" font-size="13" text-anchor="middle"><rect x="24" y="48" width="190" height="78" rx="5" fill="#eef2ed" stroke="#8b9a91"/><text x="119" y="78" fill="#1c2727"><tspan>Raw patient file</tspan><tspan x="119" dy="20">values + labels</tspan></text><rect x="300" y="24" width="235" height="66" rx="5" fill="#e4f1ed" stroke="#167b73" stroke-width="2"/><text x="417" y="51" fill="#1c2727"><tspan>Rows 0–5</tspan><tspan x="417" dy="19">clinical inputs only</tspan></text><rect x="300" y="108" width="235" height="58" rx="5" fill="#fbebe7" stroke="#c45042" stroke-width="2"/><text x="417" y="132" fill="#1c2727"><tspan>Row 6 onward</tspan><tspan x="417" dy="18">outcome labels only</tspan></text><rect x="642" y="48" width="174" height="78" rx="5" fill="#fff0d9" stroke="#d89a38" stroke-width="2"/><text x="729" y="78" fill="#1c2727"><tspan>Join by patient</tspan><tspan x="729" dy="20">after eligibility</tspan></text><rect x="880" y="48" width="142" height="78" rx="5" fill="#e9e6f0" stroke="#745d92" stroke-width="2"/><text x="951" y="78" fill="#1c2727"><tspan>Saved test</tspan><tspan x="951" dy="20">predictions</tspan></text><path d="M215 86 H290 M535 56 C580 56 590 70 632 80 M535 137 C580 137 590 105 632 94 M817 86 H870" fill="none" stroke="#536966" stroke-width="2" marker-end="url(#arrow2)"/><text x="520" y="184" fill="#52605f">Patient ID is lineage metadata, never an input feature · SepsisLabel is target-only</text></g></svg></div>'''
+-    metadata = f'<p class="diagram-label">Recorded design: {html.escape(str(design.get("lookback_hours", "six-hour look-back")))}; outcome: {html.escape(str(design.get("prediction_period", "post-look-back label")))}; split unit: {html.escape(str(design.get("split_unit", "patient")))}.</p>'
++    run_models = set(config.get("models", []))
++    lane_top, lane_h, lane_gap = 44, 66, 24
++    lane_y = {name: lane_top + i * (lane_h + lane_gap) for i, name in enumerate(ALL_MODELS)}
++    lanes_bottom = lane_y["cnn_1d"] + lane_h
++    shared_y, shared_h = lane_top + 70, lanes_bottom - lane_top - 140
++    arrow = 'fill="none" stroke="#536966" stroke-width="2" marker-end="url(#arrowL)"'
++
++    parts = [
++        '<defs><marker id="arrowL" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">'
++        '<path d="M0,0 L9,4.5 L0,9 z" fill="#536966"/></marker></defs>',
++        '<g font-family="Segoe UI, sans-serif" text-anchor="middle">',
++        # column captions
++        '<g fill="#52605f" font-size="12">'
++        '<text x="80" y="24">Ingest</text><text x="240" y="24">Cohort</text><text x="400" y="24">Split</text>'
++        '<text x="570" y="24">Representation</text><text x="757" y="24">Train-only preprocessing</text>'
++        '<text x="955" y="24">Estimator</text><text x="1135" y="24">Evaluate</text></g>',
++        _svg_box(16, shared_y, 128, shared_h, ["Patient PSV", "files", "", "40 variables", "+ SepsisLabel"],
++                 fill="#eef2ed", stroke="#8b9a91"),
++        _svg_box(172, shared_y, 136, shared_h, ["Eligibility", "", "Inputs: rows 0–5", "Outcome: row 6+", "", "1 row per patient"],
++                 fill="#e4f1ed", stroke="#167b73"),
++        _svg_box(336, shared_y, 128, shared_h, ["Patient-level", "split", "", f"seed {config.get('random_state', '—')}",
++                                                f"test {config.get('test_size', '—')}"], fill="#fff0d9", stroke="#d89a38"),
++        f'<path d="M144 {lanes_bottom / 2 + lane_top / 2} H164" {arrow}/>',
++        f'<path d="M308 {lanes_bottom / 2 + lane_top / 2} H328" {arrow}/>',
++    ]
++    # representation boxes
++    tab_top, tab_bottom = lane_y["logistic_regression"], lane_y["xgboost"] + lane_h
++    parts.append(_svg_box(500, tab_top, 140, tab_bottom - tab_top,
++                          ["Tabular features", "", "8 summaries per", "variable over", "hours 0–5,", "incl. missingness"],
++                          fill="#f3f6f4", stroke="#536966"))
++    parts.append(_svg_box(500, lane_y["cnn_1d"], 140, lane_h, ["Ordered tensor", "6 h × variables"],
++                          fill="#f3f6f4", stroke="#536966",
++                          dashed="cnn_1d" not in run_models))
++    split_mid = lanes_bottom / 2 + lane_top / 2
++    parts.append(f'<path d="M464 {split_mid} C480 {split_mid} 478 {(tab_top + tab_bottom) / 2} 492 {(tab_top + tab_bottom) / 2}" {arrow}/>')
++    cnn_mid = lane_y["cnn_1d"] + lane_h / 2
++    parts.append(f'<path d="M464 {split_mid} C482 {split_mid} 478 {cnn_mid} 492 {cnn_mid}" {arrow}/>')
++
++    specs = config.get("model_specs", {})
++    for name in ALL_MODELS:
++        y = lane_y[name]
++        mid = y + lane_h / 2
++        active = name in run_models
++        color = model_color(name) if active else "#a9b3b0"
++        fill = "#ffffff" if active else "#f6f7f5"
++        text_color = "#1c2727" if active else "#8c9794"
++        prep, est = DEFAULT_LANE_TEXT[name]
++        if name in specs and specs[name].get("preprocessing"):
++            prep = [p.split(" (")[0].capitalize() for p in specs[name]["preprocessing"]][:2]
++        parts.append(_svg_box(672, y, 170, lane_h, prep, fill=fill, stroke=color, dashed=not active,
++                              text_color=text_color, size=12))
++        label = model_label(name) + ("" if active else " (not run)")
++        parts.append(_svg_box(870, y, 170, lane_h, [label, est], fill=fill, stroke=color, bold_first=True,
++                              dashed=not active, text_color=text_color, size=12))
++        parts.append(f'<rect x="870" y="{y}" width="6" height="{lane_h}" fill="{color}"/>')
++        source_x = 640
++        parts.append(f'<path d="M{source_x} {mid} H664" {arrow}/>')
++        parts.append(f'<path d="M842 {mid} H862" {arrow}/>')
++        parts.append(f'<path d="M1040 {mid} C1056 {mid} 1052 {split_mid} 1068 {split_mid}" {arrow}/>')
++
++    parts.append(_svg_box(1076, shared_y, 118, shared_h,
++                          ["Same test", "patients", "", "Bootstrap CIs", "Matched", "sensitivity", "Calibration", "Net benefit"],
++                          fill="#e9e6f0", stroke="#745d92", size=12))
++    parts.append(f'<text x="605" y="{lanes_bottom + 30}" fill="#52605f" font-size="12">'
++                 'Solid lanes ran in this experiment; dashed lanes are available but were not selected. '
++                 'Every learned step is fitted on training patients only.</text>')
++    parts.append("</g>")
++    height = lanes_bottom + 46
++    pipeline = (f'<div class="diagram"><p class="diagram-label">Model pipeline: shared cohort and split, one lane per model, '
++                f'shared held-out evaluation</p><svg viewBox="0 0 1210 {height}" role="img" '
++                f'aria-label="Model pipeline with one lane per model">{"".join(parts)}</svg></div>')
++
++    lineage = '''<div class="diagram"><p class="diagram-label">Data lineage: predictors and target come from disjoint time ranges</p><svg viewBox="0 0 1040 200" role="img" aria-label="Data lineage diagram"><defs><marker id="arrow2" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#536966"/></marker></defs><g font-family="Segoe UI, sans-serif" font-size="13" text-anchor="middle"><rect x="24" y="48" width="190" height="78" rx="5" fill="#eef2ed" stroke="#8b9a91"/><text x="119" y="78" fill="#1c2727"><tspan>Raw patient file</tspan><tspan x="119" dy="20">values + labels</tspan></text><rect x="300" y="24" width="235" height="66" rx="5" fill="#e4f1ed" stroke="#167b73" stroke-width="2"/><text x="417" y="51" fill="#1c2727"><tspan>Rows 0–5</tspan><tspan x="417" dy="19">clinical inputs only</tspan></text><rect x="300" y="108" width="235" height="58" rx="5" fill="#fbebe7" stroke="#c45042" stroke-width="2"/><text x="417" y="132" fill="#1c2727"><tspan>Row 6 onward</tspan><tspan x="417" dy="18">outcome labels only</tspan></text><rect x="642" y="48" width="174" height="78" rx="5" fill="#fff0d9" stroke="#d89a38" stroke-width="2"/><text x="729" y="78" fill="#1c2727"><tspan>Join by patient</tspan><tspan x="729" dy="20">after eligibility</tspan></text><rect x="880" y="48" width="142" height="78" rx="5" fill="#e9e6f0" stroke="#745d92" stroke-width="2"/><text x="951" y="78" fill="#1c2727"><tspan>Saved test</tspan><tspan x="951" dy="20">predictions</tspan></text><path d="M215 86 H290 M535 56 C580 56 590 70 632 80 M535 137 C580 137 590 105 632 94 M817 86 H870" fill="none" stroke="#536966" stroke-width="2" marker-end="url(#arrow2)"/><text x="520" y="186" fill="#52605f">Patient ID is lineage metadata, never an input. SepsisLabel switches on 6 h before Sepsis-3 onset and is target-only.</text></g></svg></div>'''
++    metadata = (f'<p class="diagram-label">Recorded design: {html.escape(str(design.get("lookback_hours", "six-hour look-back")))}; '
++                f'outcome: {html.escape(str(design.get("prediction_period", "post-look-back label")))}; '
++                f'split unit: {html.escape(str(design.get("split_unit", "patient")))}.</p>')
+     return pipeline + lineage + metadata
+ 
+ 
+diff --git a/tests/test_evaluation.py b/tests/test_evaluation.py
+new file mode 100644
+index 0000000..b7ed70b
+--- /dev/null
++++ b/tests/test_evaluation.py
+@@ -0,0 +1,56 @@
++import json
++
++import numpy as np
++import pandas as pd
++
++from sepsis_prediction.evaluation import compare_models, operating_point
++
++
++def _write_predictions(directory, n=400, seed=0):
++    rng = np.random.default_rng(seed)
++    y = (rng.random(n) < 0.15).astype(int)
++    strong = np.clip(0.15 + 0.5 * y + rng.normal(0, 0.15, n), 0, 1)
++    weak = np.clip(0.15 + 0.05 * y + rng.normal(0, 0.15, n), 0, 1)
++    pd.DataFrame({
++        "patient_id": [f"p{i}" for i in range(n)],
++        "y_true": y,
++        "logistic_regression_probability": weak,
++        "xgboost_probability": strong,
++    }).to_csv(directory / "test_predictions.csv", index=False)
++    return y, strong
++
++
++def test_compare_models_ranks_separates_and_writes_artifacts(tmp_path) -> None:
++    _write_predictions(tmp_path)
++    result = compare_models(tmp_path, n_bootstrap=200, random_state=3)
++
++    assert result["best_model"] == "xgboost"
++    ranked = {row["model"]: row for row in result["models"]}
++    assert ranked["xgboost"]["rank"] == 1
++    weaker = ranked["logistic_regression"]["vs_best"]
++    assert weaker["distinguishable"] is True
++    low, high = ranked["xgboost"]["auprc_ci"]
++    assert low <= ranked["xgboost"]["auprc"] <= high
++    assert len(result["decision_curve"]["thresholds"]) == len(result["decision_curve"]["models"]["xgboost"])
++    for name in ("model_evaluation.json", "model_ranking.csv", "calibration.png", "decision_curve.png", "model_forest.png"):
++        assert (tmp_path / name).is_file()
++    json.loads((tmp_path / "model_evaluation.json").read_text(encoding="utf-8"))
++
++
++def test_compare_models_is_reproducible_for_a_fixed_seed(tmp_path) -> None:
++    _write_predictions(tmp_path)
++    first = compare_models(tmp_path, n_bootstrap=100, random_state=5)
++    second = compare_models(tmp_path, n_bootstrap=100, random_state=5)
++    assert first["models"] == second["models"]
++
++
++def test_operating_point_reaches_target_sensitivity(tmp_path) -> None:
++    y, strong = _write_predictions(tmp_path)
++    point = operating_point(y, strong, 0.8)
++    assert point["sensitivity"] >= 0.8
++    assert 0 <= point["specificity"] <= 1
++    assert point["alerts_per_100"] >= point["true_alerts_per_100"]
++
++
++def test_operating_point_is_empty_without_both_classes() -> None:
++    assert operating_point(np.zeros(10, dtype=int), np.linspace(0, 1, 10), 0.8) == {"threshold": None}
