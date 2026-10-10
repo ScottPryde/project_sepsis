@@ -65,7 +65,7 @@ def test_cli_run_ingests_psv_and_writes_cohort_and_model_artifacts(tmp_path, mon
 
     cohort = json.loads((output_dir / "cohort_summary.json").read_text(encoding="utf-8"))
     metrics = json.loads((output_dir / "metrics.json").read_text(encoding="utf-8"))
-    assert cohort == {
+    assert {key: cohort[key] for key in ("eligible_patients", "positive_outcomes", "horizon_hours", "exclusions")} == {
         "eligible_patients": 30,
         "positive_outcomes": 10,
         "horizon_hours": 2,
@@ -76,6 +76,8 @@ def test_cli_run_ingests_psv_and_writes_cohort_and_model_artifacts(tmp_path, mon
             "positive_in_lookback": 0,
         },
     }
+    assert cohort["by_source"]["psv"]["eligible_patients"] == 30
+    assert (output_dir / "cohort_audit.csv").is_file()
     assert set(metrics) == {"logistic_regression"}
     assert (output_dir / "logistic_regression.joblib").is_file()
     assert (output_dir / "test_predictions.csv").is_file()

@@ -27,45 +27,53 @@ def run_eda(records: list[PatientRecord], output_dir: str | Path) -> dict[str, A
         "rows": [len(record.frame) for record in records],
     })
 
-    total_rows = sum(len(record.frame) for record in records)
-    missing_rows: list[dict[str, Any]] = []
-    for column in KNOWN_CLINICAL_COLUMNS:
-        observed_count = 0
-        for record in records:
-            if column in record.frame.columns:
-                observed_count += int(pd.to_numeric(record.frame[column], errors="coerce").notna().sum())
-        missing_count = total_rows - observed_count
-        missing_rows.append({
-            "variable": column,
-            "observed_count": observed_count,
-            "missing_count": missing_count,
-            "missing_fraction": missing_count / total_rows if total_rows else None,
-        })
-    missingness = pd.DataFrame(missing_rows).sort_values(
+    long = pd.concat(
+        [
+            record.frame.reindex(columns=[*KNOWN_CLINICAL_COLUMNS, TARGET_COLUMN]).assign(
+                hour_index=range(len(record.frame)), source=record.source,
+            )
+            for record in records
+        ],
+        ignore_index=True,
+    )
+    for column in (*KNOWN_CLINICAL_COLUMNS, TARGET_COLUMN):
+        long[column] = pd.to_numeric(long[column], errors="coerce")
+    total_rows = len(long)
+    observed_counts = long[list(KNOWN_CLINICAL_COLUMNS)].notna().sum()
+    missingness = pd.DataFrame({
+        "variable": list(KNOWN_CLINICAL_COLUMNS),
+        "observed_count": [int(observed_counts[column]) for column in KNOWN_CLINICAL_COLUMNS],
+    })
+    missingness["missing_count"] = total_rows - missingness["observed_count"]
+    missingness["missing_fraction"] = missingness["missing_count"] / total_rows if total_rows else None
+    missingness = missingness.sort_values(
         ["missing_fraction", "variable"], ascending=[False, True], ignore_index=True,
     )
 
-    label_counts: dict[str, int] = {"0": 0, "1": 0}
-    hourly_positive: dict[int, int] = {}
-    hourly_rows: dict[int, int] = {}
-    for record in records:
-        labels = pd.to_numeric(record.frame[TARGET_COLUMN], errors="coerce").astype(int)
-        counts = labels.value_counts()
-        label_counts["0"] += int(counts.get(0, 0))
-        label_counts["1"] += int(counts.get(1, 0))
-        for hour, label in enumerate(labels):
-            hourly_rows[hour] = hourly_rows.get(hour, 0) + 1
-            hourly_positive[hour] = hourly_positive.get(hour, 0) + int(label == 1)
+    positive = long[TARGET_COLUMN].eq(1)
+    label_counts = {"0": int(long[TARGET_COLUMN].eq(0).sum()), "1": int(positive.sum())}
+    hourly = (
+        long.assign(positive=positive.astype(int))
+        .groupby("hour_index", sort=True)
+        .agg(patients_observed=("positive", "size"), positive_labels=("positive", "sum"))
+        .reset_index()
+    )
+    hourly["positive_fraction"] = hourly["positive_labels"] / hourly["patients_observed"]
 
-    hourly = pd.DataFrame([
-        {
-            "hour_index": hour,
-            "patients_observed": hourly_rows[hour],
-            "positive_labels": hourly_positive[hour],
-            "positive_fraction": hourly_positive[hour] / hourly_rows[hour],
+    lengths["source"] = [record.source for record in records]
+    patient_positive = pd.Series(
+        [bool(pd.to_numeric(record.frame[TARGET_COLUMN], errors="coerce").eq(1).any()) for record in records],
+    )
+    by_source = {}
+    for source, rows in long.groupby("source", sort=True):
+        in_source = lengths["source"] == source
+        by_source[str(source)] = {
+            "patient_count": int(in_source.sum()),
+            "hourly_observation_count": int(len(rows)),
+            "record_length_median": float(lengths.loc[in_source, "rows"].median()),
+            "positive_patient_fraction": float(patient_positive[in_source.to_numpy()].mean()),
+            "positive_label_fraction": float(rows[TARGET_COLUMN].eq(1).mean()),
         }
-        for hour in sorted(hourly_rows)
-    ])
     lengths.to_csv(output / "record_lengths.csv", index=False)
     missingness.to_csv(output / "missingness.csv", index=False, float_format="%.8g")
     hourly.to_csv(output / "labels_by_hour.csv", index=False, float_format="%.8g")
@@ -79,6 +87,7 @@ def run_eda(records: list[PatientRecord], output_dir: str | Path) -> dict[str, A
         "label_counts": label_counts,
         "positive_label_fraction": label_counts["1"] / total_rows if total_rows else None,
         "variables": list(KNOWN_CLINICAL_COLUMNS),
+        "by_source": by_source,
     }
     (output / "dataset_summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True, allow_nan=False) + "\n",

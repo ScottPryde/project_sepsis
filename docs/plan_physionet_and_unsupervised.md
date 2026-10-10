@@ -46,8 +46,7 @@ Other findings:
 ### A0. Housekeeping (0.5 day)
 
 - Create branch `feature/physionet-integration`.
-- Restore `docs/experimental_design.md` or remove the README link.
-- Either create `IMPROVEMENTS.md` or remove references to it. Part B's handover plan depends on it.
+- Remove the README link to `docs/experimental_design.md`, and drop the handover plan's references to `IMPROVEMENTS.md`. Neither file is recreated.
 
 ### A1. Multi-folder loading with a hospital tag (1 day)
 
@@ -198,12 +197,28 @@ A0 ─ A1 ─ A2 ─┬─ A3 (decision) ─ A4 ─ A5 ─ A8 ─ A7
 - Part A: about 8 days. Part B: about 8 days (+3 stretch). Total about 16 developer-days; about 12 elapsed with two people, since A6 and B4 can run in parallel.
 - Use one branch per part (`feature/physionet-integration`, then `feature/unsupervised-explore` off it), merging A before B3 starts.
 
-## Decisions needed before starting
+## Decisions (resolved 10 Oct 2026)
 
-1. **A3:** look-back window as rows 0-5 with an audit field (recommended), or exclude late-starting records.
-2. **A2:** cache format, Parquet with `pyarrow` (recommended) or pickle.
-3. **A0:** restore `docs/experimental_design.md` and create `IMPROVEMENTS.md`, or drop the references.
-4. **Part B:** confirm the Isolation Forest goes in the new section only, and that cluster-as-feature is deferred.
+1. **A3:** keep the look-back as the first six rows. Record `ICULOS` at row 0 per patient for audit only.
+2. **A2:** the cache is Parquet, with `pyarrow` in a new `data` optional extra.
+3. **A0:** remove references to `docs/experimental_design.md` and `IMPROVEMENTS.md` rather than recreating them.
+4. **Part B:** the Isolation Forest goes only in the new report section; cluster membership as a supervised feature is deferred.
+
+## Progress
+
+Branch `feature/physionet-integration`:
+
+- [x] A0: README link to the deleted design doc removed
+- [x] A1: `--data-dir` takes several folders; records carry `source`; duplicate IDs rejected
+- [x] A2: parallel loading, `cache` command and `--cache` on every command, vectorised features and EDA, `data` extra
+- [x] A3: `ICULOS` at row 0 in `cohort_audit.csv` and `cohort_summary.json`; anchor recorded in `DESIGN`
+- [x] A4: public `split_patients`, `--split-mode pooled|hospital`, split composition in `run_config.json`, app passes the options through
+- [x] A5: per-hospital cohort table, prevalence, and late-start count in the report; no-skill line on the PR plot; `auprc_over_prevalence` in `model_comparison.csv`
+- [x] A6: synthetic demo now has 160 patients in two sources, triggers all four exclusions, has sparse labs, late starts, and 15% prevalence, and fails if any of that stops being exercised
+- [x] A7: `compare` command writing CSVs and a self-contained `comparison.html`
+- [ ] A8: pooled, A→B and B→A done (tabular models); still to run: CNN on pooled, `pooled_h12` sensitivity run
+
+Measured on the full data: building the cache takes 400 s once (16 MB file); `validate` from the cache takes 35 s, and `eda` 58 s.
 
 ## Data and citation
 

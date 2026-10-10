@@ -306,7 +306,8 @@ def create_application_server(
 def serve_application(
     *,
     output_dir: str | Path,
-    data_dir: str | Path | None = None,
+    data_dir: str | Path | list[str | Path] | None = None,
+    cache: str | Path | None = None,
     synthetic_demo: bool = False,
     host: str = "127.0.0.1",
     port: int = 8765,
@@ -338,12 +339,17 @@ def serve_application(
                 "--model", model,
             ]
             continue
-        if data_dir is None:
-            raise ValueError("--data-dir is required unless --synthetic-demo is selected")
+        if cache is not None:
+            data_arguments = ["--cache", str(Path(cache).resolve())]
+        elif data_dir is not None:
+            directories = [data_dir] if isinstance(data_dir, (str, Path)) else list(data_dir)
+            data_arguments = ["--data-dir", *(str(Path(directory).resolve()) for directory in directories)]
+        else:
+            raise ValueError("--data-dir or --cache is required unless --synthetic-demo is selected")
         selected_models = ["logistic_regression"] if model == "cnn_1d" else [model]
         command = [
             sys.executable, "-m", "sepsis_prediction.cli", "run",
-            "--data-dir", str(Path(data_dir).resolve()),
+            *data_arguments,
             "--output-dir", str(model_root),
             "--test-size", str(options.get("test_size", 0.2)),
             "--validation-size", str(options.get("validation_size", 0.2)),
@@ -354,6 +360,12 @@ def serve_application(
         ]
         if options.get("threshold") is not None:
             command.extend(["--threshold", str(options["threshold"])])
+        if options.get("split_mode", "pooled") == "hospital":
+            command.extend([
+                "--split-mode", "hospital",
+                "--train-sources", *options.get("train_sources", []),
+                "--test-sources", *options.get("test_sources", []),
+            ])
         if model == "cnn_1d":
             command.extend(["--cnn", "--cnn-epochs", str(options.get("cnn_epochs", 20))])
         commands[model] = command

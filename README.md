@@ -28,29 +28,55 @@ To install into the project virtual environment explicitly, run `.\.venv\Scripts
 
 ## Data Setup
 
-Obtain the PhysioNet Challenge 2019 dataset from <https://physionet.org/content/challenge-2019/1.0.0/> and follow its access and usage terms. Point the commands at a directory containing `.psv` files, one patient per file. Keep downloaded data outside version control; `data/` and common output directories are ignored.
+Obtain the PhysioNet Challenge 2019 dataset from <https://physionet.org/content/challenge-2019/1.0.0/> and follow its access and usage terms. `python data/download_data.py` fetches and checksums both hospitals into `data/raw/training_setA` (hospital A, 20,336 files) and `data/raw/training_setB` (hospital B, 20,000 files). Keep downloaded data outside version control; `data/` and common output directories are ignored.
 
-The validator requires a `SepsisLabel` column containing numeric 0/1 values. Missing clinical input columns are allowed and become all-missing features; present clinical values must be numeric. If present, `ICULOS` must increase by one per row. Input files are processed in sorted filename order for deterministic cohort construction. `validate` prints counts by default; add `--verbose` to list patient filenames.
+`--data-dir` accepts one or more folders of `.psv` files, one patient per file. Each patient is tagged with its folder name as its `source` (hospital), and patient identifiers must be unique across folders. The validator requires a `SepsisLabel` column containing numeric 0/1 values. Missing clinical input columns are allowed and become all-missing features; present clinical values must be numeric. If present, `ICULOS` must increase by one per row. Input files are processed in sorted filename order for deterministic cohort construction; folders with 2,000 or more files are read in parallel. `validate` prints counts by default; add `--verbose` to list patient filenames.
+
+Reading 40,336 small files takes several minutes, so validate them once into a Parquet cache (needs `python -m pip install -e ".[data]"`) and pass `--cache` to every other command:
+
+```powershell
+sepsis-pipeline cache --data-dir .\data\raw\training_setA .\data\raw\training_setB --output .\data\cache\physionet2019.parquet
+```
+
+Records are validated before caching and not re-validated on load. Rebuild the cache whenever the raw files change.
 
 ## Run
 
 Validate the files and get basic counts:
 
 ```powershell
-sepsis-pipeline validate --data-dir .\data\train
+sepsis-pipeline validate --cache .\data\cache\physionet2019.parquet
 ```
 
-Create exploratory summaries and figures from the raw loaded dataset, before cohort filtering:
+Create exploratory summaries and figures from the raw loaded dataset, before cohort filtering, including per-hospital counts:
 
 ```powershell
-sepsis-pipeline eda --data-dir .\data\train --output-dir .\eda
+sepsis-pipeline eda --cache .\data\cache\physionet2019.parquet --output-dir .\outputs\physionet\eda
 ```
 
 Build the early-prediction cohort, train both tabular baselines, evaluate held-out patient groups, and save artifacts:
 
 ```powershell
-sepsis-pipeline run --data-dir .\data\train --output-dir .\artifacts --random-state 42 --test-size 0.2
+sepsis-pipeline run --cache .\data\cache\physionet2019.parquet --output-dir .\outputs\physionet\pooled --random-state 42 --test-size 0.2
 ```
+
+By default (`--split-mode pooled`) patients from all sources are split at random. To test generalisation across hospitals, train on one and test on every eligible patient from the other:
+
+```powershell
+sepsis-pipeline run --cache .\data\cache\physionet2019.parquet --output-dir .\outputs\physionet\a_to_b --split-mode hospital --train-sources training_setA --test-sources training_setB
+```
+
+In hospital mode, fit and validation patients come only from `--train-sources`; `--test-size` is ignored.
+
+Summarise completed runs side by side, for example the synthetic demo against the real-data runs:
+
+```powershell
+sepsis-pipeline compare --run synthetic=.\outputs\synthetic_e2e_v2\run --run pooled=.\outputs\physionet\pooled --run a_to_b=.\outputs\physionet\a_to_b --run b_to_a=.\outputs\physionet\b_to_a --output-dir .\outputs\comparison
+```
+
+This writes `comparison_cohorts.csv`, `comparison_models.csv`, and a self-contained `comparison.html`. Each model's AUPRC is shown with its bootstrap interval and as a multiple of test prevalence, which is what a no-skill model scores.
+
+The look-back window is always the first six rows of each file. In PhysioNet 2019 about a fifth of records start after ICU hour 1, mostly in hospital A, so those rows are not always the first six ICU hours. `ICULOS` at row 0 is recorded per patient in `cohort_audit.csv` and summarised in `cohort_summary.json`; it is never a predictor.
 
 The outcome horizon defaults to 24 hours. For a different endpoint, pass `--horizon-hours 12` or `--horizon-hours 48`. By default, each model's threshold is selected on validation patients to reach 80% sensitivity; `--validation-size` and `--target-sensitivity` adjust that procedure. `--threshold` explicitly overrides it with a common fixed threshold.
 
@@ -60,24 +86,25 @@ To run the whole workflow without downloading the clinical dataset, use the fabr
 python .\scripts\run_synthetic_demo.py
 ```
 
-Install `python -m pip install -e ".[dev,cnn,xgboost]"` before running the demo. It runs validation, EDA, all tabular models, one CNN epoch, and checks the report at `outputs/synthetic_e2e/run/report.html`. Its generated labels and measurements are not clinical data or evidence.
+Install `python -m pip install -e ".[dev,cnn,xgboost]"` before running the demo. It writes 160 fabricated patients into two source folders with PhysioNet-like features: varied record lengths, sparse laboratory values, records that start after ICU hour 1, and patients who trigger every cohort exclusion. It runs validation, EDA, all tabular models, and one CNN epoch, then checks the report at `outputs/synthetic_e2e/run/report.html` and fails if any exclusion rule or source goes unexercised. Its generated labels and measurements are not clinical data or evidence.
 
 Choose models with `--models logistic_regression random_forest xgboost`. Add `--cnn --cnn-epochs 20` to train the PyTorch CNN. The CNN and tabular models share one stratified patient split; CNN early stopping uses validation loss. Run `python -m sepsis_prediction.cli` in place of the installed command when working from a source checkout.
 
-Start the JavaScript application from the project environment with `.\.venv\Scripts\python.exe -m sepsis_prediction.cli serve --synthetic-demo --output-dir .\outputs\synthetic_e2e`. For clinical data, use `.\.venv\Scripts\python.exe -m sepsis_prediction.cli serve --data-dir .\data\train --output-dir .\artifacts`. Open the printed local URL. Each model has its own run button, elapsed timer, results, and model-specific charts; runs are serialized and refresh the relevant panel on completion. The full generated report remains available inside the application. The server binds only to loopback.
+Start the JavaScript application from the project environment with `.\.venv\Scripts\python.exe -m sepsis_prediction.cli serve --synthetic-demo --output-dir .\outputs\synthetic_e2e`. For clinical data, use `.\.venv\Scripts\python.exe -m sepsis_prediction.cli serve --cache .\data\cache\physionet2019.parquet --output-dir .\outputs\physionet\app`; the split-mode flags work here too. Open the printed local URL. Each model has its own run button, elapsed timer, results, and model-specific charts; runs are serialized and refresh the relevant panel on completion. The full generated report remains available inside the application. The server binds only to loopback.
 
 ## Outputs
 
 - The `serve` command opens the JavaScript pipeline application. Its model panels can run Logistic Regression, Random Forest, XGBoost, or the CNN independently, with completion timing, metrics, feature signals, and model-specific charts. A full generated report remains available in the application and as `report.html`.
 - The report describes the PhysioNet 2019 PSV datasource, sorted file ingestion, required target checks, numeric field validation, optional fields, and `ICULOS` continuity checks. Physiologic range validation and unit normalization are not performed.
-- `cohort_summary.json`: eligible outcome counts, configured horizon, and exclusion counts, including incomplete negative follow-up.
+- `cohort_summary.json`: eligible outcome counts, prevalence, configured horizon, and exclusion counts (including incomplete negative follow-up), overall and per source, plus the distribution of `ICULOS` at row 0.
+- `cohort_audit.csv`: one row per loaded patient with source, record length, `ICULOS` at row 0, cohort status or exclusion reason, and outcome.
 - `metrics.json`: AUROC, average precision/AUPRC, sensitivity, specificity, precision, F1, accuracy, Brier score, validation-selected threshold, and confusion matrix. AUROC/AUPRC are `null` if the test split has only one class.
 - `model_comparison.csv` and `model_curves.png`: held-out comparison table and ROC/precision-recall plots.
 - `model_evaluation.json`, `model_ranking.csv`, `model_forest.png`, `calibration.png`, and `decision_curve.png`: head-to-head ranking, paired bootstrap uncertainty, frozen-threshold operating points, calibration, and decision analysis.
 - `feature_importance.csv`: Logistic Regression coefficients and tree feature importances. These are model associations, not causal or clinical effects.
 - `test_predictions.csv`: held-out patient IDs, labels, probabilities, and thresholded predictions.
 - `split_patients.json` and `validation_predictions.csv`: fit/validation/test patient membership and validation outputs for audit and reproducibility.
-- `feature_names.json` and `run_config.json`: feature schema, split parameters, explicit prediction design, and package versions.
+- `feature_names.json` and `run_config.json`: feature schema, split mode and parameters, each split's size, prevalence and source mix (`split_composition`), explicit prediction design, and package versions.
 - `logistic_regression.joblib` and `random_forest.joblib`: fitted preprocessing-plus-model pipelines.
 - `xgboost.joblib`: fitted XGBoost pipeline when selected.
 - `cnn_1d.pt`: CNN weights and train-fitted imputation/scaling values when `--cnn` is selected.
@@ -95,7 +122,7 @@ Tests create temporary synthetic PSV files and do not download or require clinic
 python -m pytest
 ```
 
-The project plan and architecture/data-flow diagram are in [docs/experimental_design.md](docs/experimental_design.md).
+The plan for PhysioNet integration and unsupervised exploration is in [docs/plan_physionet_and_unsupervised.md](docs/plan_physionet_and_unsupervised.md).
 
 ## Clinical-Use Caveat
 

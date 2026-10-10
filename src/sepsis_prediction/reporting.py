@@ -43,9 +43,15 @@ def write_model_comparison(output_dir: str | Path) -> pd.DataFrame:
         }
         for model_name in model_names
     ])
+    labels = predictions["y_true"].to_numpy(dtype=int)
+    prevalence = float(labels.mean()) if len(labels) else 0.0
+    table.insert(
+        3, "auprc_over_prevalence",
+        [value / prevalence if value is not None and prevalence > 0 else None
+         for value in table["auprc_average_precision"]],
+    )
     table.to_csv(output / "model_comparison.csv", index=False, float_format="%.8g")
 
-    labels = predictions["y_true"].to_numpy(dtype=int)
     has_both_classes = pd.Series(labels).nunique() == 2
     figure, axes = plt.subplots(1, 2, figsize=(11, 4.5))
     if has_both_classes:
@@ -56,6 +62,10 @@ def write_model_comparison(output_dir: str | Path) -> pd.DataFrame:
             axes[0].plot(false_positive_rate, true_positive_rate, label=model_name)
             axes[1].plot(recall, precision, label=model_name)
         axes[0].plot([0, 1], [0, 1], color="#777777", linestyle="--", linewidth=1)
+        axes[1].axhline(
+            prevalence, color="#777777", linestyle="--", linewidth=1,
+            label=f"No skill (prevalence {prevalence:.3f})",
+        )
         axes[0].set(xlabel="False positive rate", ylabel="True positive rate", title="ROC")
         axes[1].set(xlabel="Recall", ylabel="Precision", title="Precision-recall")
         axes[0].legend(loc="lower right", frameon=False)
@@ -231,8 +241,13 @@ def _render_cohort(cohort: dict[str, Any], dataset: dict[str, Any]) -> str:
             ("Eligible patients", cohort.get("eligible_patients", "—")),
             ("Positive outcomes", cohort.get("positive_outcomes", "—")),
         ])
+        if cohort.get("prevalence") is not None:
+            values.append(("Outcome prevalence", f"{float(cohort['prevalence']):.3f}"))
         for key, value in cohort.get("exclusions", {}).items():
             values.append((f"Excluded · {key.replace('_', ' ')}", value))
+        start = cohort.get("eligible_iculos_at_row_0", {})
+        if start.get("observed"):
+            values.append(("Eligible records starting after ICU hour 1", start.get("starts_after_hour_1", "—")))
     if dataset:
         values.extend([
             ("Source patients", dataset.get("patient_count", "—")),
@@ -245,7 +260,32 @@ def _render_cohort(cohort: dict[str, Any], dataset: dict[str, Any]) -> str:
         f'<div class="stat"><strong>{html.escape(str(value))}</strong><span>{html.escape(label)}</span></div>'
         for label, value in values
     )
-    return f'<section><h2>Study snapshot</h2><div class="summary-grid">{cards}</div></section>'
+    return f'<section><h2>Study snapshot</h2><div class="summary-grid">{cards}</div>{_render_sources(cohort)}</section>'
+
+
+def _render_sources(cohort: dict[str, Any]) -> str:
+    by_source = cohort.get("by_source", {}) if cohort else {}
+    if len(by_source) < 2:
+        return ""
+    rows = []
+    for source, values in by_source.items():
+        exclusions = values.get("exclusions", {})
+        start = values.get("eligible_iculos_at_row_0", {})
+        rows.append({
+            "Source": source,
+            "Loaded": values.get("loaded_patients"),
+            "Eligible": values.get("eligible_patients"),
+            "Positive": values.get("positive_outcomes"),
+            "Prevalence": values.get("prevalence"),
+            "Excluded: incomplete follow-up": exclusions.get("incomplete_horizon_followup"),
+            "Excluded: positive in look-back": exclusions.get("positive_in_lookback"),
+            "Eligible starting after ICU hour 1": start.get("starts_after_hour_1"),
+        })
+    rendered = pd.DataFrame(rows).to_html(
+        index=False, border=0, classes="results-table", na_rep="—",
+        float_format=lambda value: f"{value:.3f}",
+    )
+    return '<h3>Cohort by source</h3><div class="table-wrap">' + rendered + "</div>"
 
 
 def _render_charts(output: Path, metrics: dict[str, dict[str, Any]]) -> str:
