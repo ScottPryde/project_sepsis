@@ -19,7 +19,8 @@ from sepsis_prediction.features import (
     create_sequence_examples,
     summarise_cohort,
 )
-from sepsis_prediction.modeling import SPLIT_MODES, run_experiment
+from sepsis_prediction.modeling import SPLIT_MODES, run_experiment, split_patients
+from sepsis_prediction.unsupervised import DEFAULT_METHODS, EXPLORE_METHODS, FEATURE_SETS, run_exploration
 from sepsis_prediction.reporting import write_html_report, write_model_comparison
 from sepsis_prediction.application import serve_application
 
@@ -108,6 +109,24 @@ def _parser() -> argparse.ArgumentParser:
     serve.add_argument("--cnn-epochs", type=int, default=20)
     _add_split_options(serve)
 
+    explore = commands.add_parser(
+        "explore", help="label-blind PCA, clustering, and anomaly detection, described against the outcome",
+    )
+    _add_data_source(explore)
+    explore.add_argument(
+        "--output-dir", type=Path, default=Path("artifacts"),
+        help="run directory; its split_patients.json is reused when present",
+    )
+    explore.add_argument("--methods", nargs="+", choices=EXPLORE_METHODS, default=DEFAULT_METHODS)
+    explore.add_argument("--k-range", nargs=2, type=int, default=(2, 8), metavar=("LOW", "HIGH"))
+    explore.add_argument("--feature-sets", nargs="+", choices=FEATURE_SETS, default=FEATURE_SETS)
+    explore.add_argument("--stability-resamples", type=int, default=50)
+    explore.add_argument("--random-state", type=int, default=42)
+    explore.add_argument("--test-size", type=float, default=0.2)
+    explore.add_argument("--validation-size", type=float, default=0.2)
+    explore.add_argument("--horizon-hours", type=int, default=DEFAULT_HORIZON_HOURS)
+    _add_split_options(explore)
+
     compare = commands.add_parser("compare", help="summarise completed runs side by side")
     compare.add_argument(
         "--run", action="append", required=True, metavar="NAME=PATH",
@@ -121,6 +140,57 @@ def _load_records(args: argparse.Namespace):
     if args.cache is not None:
         return read_record_cache(args.cache)
     return load_patient_files(args.data_dir)
+
+
+def _explore(args, records, features, labels, groups, sources) -> None:
+    output_dir: Path = args.output_dir
+    split_path = output_dir / "split_patients.json"
+    if split_path.is_file():
+        run_config_path = output_dir / "run_config.json"
+        if run_config_path.is_file():
+            run_horizon = json.loads(run_config_path.read_text(encoding="utf-8")).get("design", {}).get("horizon_hours")
+            if run_horizon is not None and run_horizon != args.horizon_hours:
+                raise SystemExit(
+                    f"{output_dir} was run with --horizon-hours {run_horizon}; pass the same value to explore",
+                )
+        saved = json.loads(split_path.read_text(encoding="utf-8"))
+        split = {name: saved[name] for name in ("fit", "validation", "test")}
+        if set().union(*split.values()) != set(labels.index):
+            raise SystemExit(f"{split_path} does not match this cohort; check --cache/--data-dir and --horizon-hours")
+        split_origin = f"reused from {split_path.name} of the supervised run"
+    else:
+        positions = split_patients(
+            labels, groups,
+            test_size=args.test_size, validation_size=args.validation_size, random_state=args.random_state,
+            split_mode=args.split_mode, sources=sources,
+            train_sources=tuple(args.train_sources), test_sources=tuple(args.test_sources),
+        )
+        split = {name: labels.index[indexes].astype(str).tolist() for name, indexes in positions.items()}
+        split_origin = "computed with the same seeded procedure as run"
+        (output_dir / "explore").mkdir(parents=True, exist_ok=True)
+        (output_dir / "explore" / "split_patients.json").write_text(
+            json.dumps(split, indent=2) + "\n", encoding="utf-8",
+        )
+    record_lengths = pd.Series({record.patient_id: len(record.frame) for record in records}).loc[labels.index]
+    result = run_exploration(
+        features, labels, split, output_dir,
+        sources=sources,
+        record_lengths=record_lengths,
+        methods=tuple(args.methods),
+        k_range=tuple(args.k_range),
+        feature_sets=tuple(args.feature_sets),
+        stability_resamples=args.stability_resamples,
+        random_state=args.random_state,
+        split_origin=split_origin,
+        run_settings={"horizon_hours": args.horizon_hours, "split_mode": args.split_mode},
+    )
+    report_path = write_html_report(output_dir, records=records, features=features)
+    print(json.dumps({
+        "explore_dir": str(output_dir / "explore"),
+        "split_origin": split_origin,
+        "summary": result["summary"],
+        "report": str(report_path),
+    }, indent=2))
 
 
 def main() -> None:
@@ -199,6 +269,9 @@ def main() -> None:
     features, labels, groups, exclusions = create_examples(records, horizon_hours=args.horizon_hours)
     source_by_patient = {record.patient_id: record.source for record in records}
     sources = pd.Series([source_by_patient[patient] for patient in labels.index], index=labels.index, name="source")
+    if args.command == "explore":
+        _explore(args, records, features, labels, groups, sources)
+        return
     metrics = run_experiment(
         features,
         labels,

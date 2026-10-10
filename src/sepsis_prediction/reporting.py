@@ -112,8 +112,10 @@ def write_html_report(
     cohort_html = _render_cohort(cohort, dataset)
     feature_html = _render_feature_sample(features)
     charts_html = _render_charts(output, metrics)
-    diagrams_html = _render_diagrams(config)
+    explore_config = _read_json(output / "explore" / "explore_config.json", {})
+    diagrams_html = _render_diagrams(config, explore_ran=bool(explore_config))
     evaluation = _read_json(output / "model_evaluation.json", {})
+    exploration_html = _render_exploration(output, explore_config, evaluation)
     methodology_html = _render_methodology(config, cohort, features)
     effective_html = _render_effective(evaluation)
     importance = pd.read_csv(output / "feature_importance.csv") if (output / "feature_importance.csv").exists() else pd.DataFrame()
@@ -164,6 +166,7 @@ section {{ padding:22px 0 26px; border-top:1px solid var(--line); }} h2 {{ margi
 {data_source_html}
 {methodology_html}
 <section><h2>Model results</h2>{effective_html}{review_html}<details class="detail"><summary>Additional model metrics</summary>{metrics_html}{comparison_html}</details><div class="chart-grid">{charts_html}</div></section>
+{exploration_html}
 <section><h2>Pipeline and data lineage</h2>{diagrams_html}</section>
 <section><h2>Sample of source observations</h2><p class="diagram-label">First six rows only, matching the model input window; identifiers are replaced with report-local labels.</p>{sample_html}</section>
 <section><h2>Sample engineered inputs</h2><p class="diagram-label">Descriptive feature values from the same fixed look-back, where available.</p>{feature_html}</section>
@@ -537,7 +540,132 @@ def _color_for_metric(metric: str) -> str:
     return colors[metric]
 
 
-def _render_diagrams(config: dict[str, Any]) -> str:
+def _embed_png(path: Path, alt: str) -> str:
+    if not path.is_file():
+        return ""
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f'<div class="panel"><img src="data:image/png;base64,{encoded}" alt="{html.escape(alt)}"></div>'
+
+
+def _format_ci(value: Any, interval: list[Any] | None) -> str:
+    if value is None:
+        return "—"
+    if not interval or interval[0] is None or interval[1] is None:
+        return f"{float(value):.3f}"
+    return f"{float(value):.3f} ({float(interval[0]):.3f}–{float(interval[1]):.3f})"
+
+
+def _render_exploration(output: Path, config: dict[str, Any], evaluation: dict[str, Any]) -> str:
+    """Unsupervised exploration section; empty when ``explore`` has not been run."""
+    if not config:
+        return ""
+    summary = _read_json(output / "explore" / "explore_summary.json", {})
+    methods = ", ".join(config.get("methods", []))
+    umap_note = f" {config['umap_note']}" if config.get("umap_note") else ""
+    note = (
+        f"<p>Methods: {html.escape(methods)}. Train-fitted median imputation and scaling (constant and duplicate "
+        f"columns dropped), PCA to {int(100 * config.get('pca', {}).get('variance_target', 0.9))}% variance "
+        f"(at most {config.get('pca', {}).get('max_components', 20)} components), clustering for k = "
+        f"{config.get('k_range', [2, 8])[0]}–{config.get('k_range', [2, 8])[1]}, and an Isolation Forest, all fitted on "
+        f"{config.get('n_fit', '—')} fit patients. Cluster stability uses {config.get('stability_resamples', '—')} "
+        f"bootstrap refits compared on {config.get('n_validation', '—')} validation patients; results describe "
+        f"{config.get('n_test', '—')} test patients. Patient split: {html.escape(str(config.get('split_origin', '')))}."
+        f"{html.escape(umap_note)} {html.escape(config.get('label_statement', ''))}</p>"
+    )
+    caution = (
+        '<p class="caution">Clusters are statistical groupings of the first six rows, not clinical phenotypes. '
+        "Read each table with its stability score; groups below the stability threshold should not be interpreted.</p>"
+    )
+    top_model = next(iter(evaluation.get("models", [])), None)
+    parts = [f'<section><h2>Unsupervised exploration</h2><div class="prose">{note}{caution}</div>']
+    for feature_set, details in summary.get("feature_sets", {}).items():
+        set_dir = output / "explore" / feature_set
+        label = "all engineered features" if feature_set == "all" else "measured values only (missingness indicators removed)"
+        parts.append(f"<h3>Feature set: {html.escape(label)}</h3>")
+        pca = details.get("pca", {})
+        parts.append(
+            f'<p class="diagram-label">{details.get("used_features", "—")} of {details.get("input_features", "—")} '
+            f'features used; PCA kept {pca.get("components", "—")} components '
+            f'({float(pca.get("explained_variance", 0)):.0%} variance). PC1 alone ranks test outcomes with AUROC '
+            f'{_format_ci(pca.get("pc1_auroc"), pca.get("pc1_auroc_ci"))}.</p>'
+        )
+        parts.append('<div class="chart-grid">'
+                     + _embed_png(set_dir / "embedding.png", f"Test patients in the {feature_set} embedding, coloured by outcome")
+                     + _embed_png(set_dir / "k_selection.png", f"Cluster count selection for {feature_set} features")
+                     + "</div>")
+        for method, cluster in details.get("clusters", {}).items():
+            stability = cluster.get("stability", {})
+            test = cluster.get("outcome_rate_test", {})
+            flag = " — <strong>unstable</strong>" if stability.get("unstable") else ""
+            if cluster.get("k_at_range_limit"):
+                flag += " — <strong>k is at the edge of the searched range</strong>, so it is not a clear optimum"
+            test_text = (
+                f"chi-square p = {test['p_value']:.3g}" if test.get("p_value") is not None
+                else f"chi-square not reported: {test.get('skipped', 'unavailable')}"
+            )
+            method_name = "k-means" if method == "kmeans" else "Gaussian mixture"
+            parts.append(
+                f'<p class="diagram-label">{method_name}: k = {cluster.get("k")} ({html.escape(cluster.get("selection_rule", ""))}); '
+                f'stability mean ARI {_format_value(stability.get("mean_ari"))} (threshold {stability.get("threshold", 0.6)}){flag}; '
+                f"{html.escape(test_text)}.</p>"
+            )
+            profile_path = set_dir / f"cluster_profiles_{method}.csv"
+            if profile_path.is_file():
+                profile = pd.read_csv(profile_path)
+                profile.insert(4, "sepsis rate (95% CI)", [
+                    _format_ci(row.sepsis_rate, [row.rate_ci_low, row.rate_ci_high]) for row in profile.itertuples()
+                ])
+                profile = profile.drop(columns=["sepsis_rate", "rate_ci_low", "rate_ci_high"])
+                rendered = profile.to_html(index=False, border=0, na_rep="—", float_format=lambda value: f"{value:.2f}")
+                parts.append(f'<div class="table-wrap">{rendered}</div>')
+        forest = details.get("isolation_forest")
+        if forest:
+            rows = [("Isolation Forest anomaly score (unsupervised)", forest)]
+            if top_model:
+                rows.append((f"Top supervised model for context: {top_model.get('model')}", top_model))
+            cells = "".join(
+                f"<tr><td>{html.escape(name)}</td><td>{_format_ci(values.get('auroc'), values.get('auroc_ci'))}</td>"
+                f"<td>{_format_ci(values.get('auprc'), values.get('auprc_ci'))}</td></tr>"
+                for name, values in rows
+            )
+            parts.append(
+                '<p class="diagram-label">Does "physiologically unusual" rank patients who later develop sepsis? '
+                f'Test prevalence {_format_value(forest.get("prevalence"))} is the no-skill AUPRC.</p>'
+                '<div class="table-wrap"><table><thead><tr><th>Score</th><th>AUROC (95% CI)</th>'
+                f"<th>AUPRC (95% CI)</th></tr></thead><tbody>{cells}</tbody></table></div>"
+            )
+    parts.append("</section>")
+    return "".join(parts)
+
+
+def _render_exploration_lane(y: int, active: bool) -> list[str]:
+    stroke = "#745d92" if active else "#a9b3b0"
+    fill = "#ffffff" if active else "#f5f6f4"
+    dash = "" if active else ' stroke-dasharray="5 4"'
+    boxes = (
+        (18, 132, "Rows 0–5"),
+        (188, 132, "Engineered summaries"),
+        (358, 132, "Train-only PCA"),
+        (528, 132, "Clustering + anomaly"),
+        (698, 132, "No labels used"),
+        (868, 114, "Test outcome rates"),
+    )
+    parts = []
+    for x, width, text in boxes:
+        parts.append(f'<rect x="{x}" y="{y}" width="{width}" height="42" rx="4" fill="{fill}" stroke="{stroke}"{dash}/>')
+        if x == 18:
+            parts.append(f'<text x="{x + width / 2}" y="{y + 17}" font-size="9" font-weight="700" fill="{stroke}">'
+                         f'Exploration<tspan x="{x + width / 2}" dy="13" font-weight="400" fill="#1c2727">{text}</tspan></text>')
+        else:
+            parts.append(f'<text x="{x + width / 2}" y="{y + 25}" font-size="10" fill="#1c2727">{html.escape(text)}</text>')
+    for x in (150, 320, 490, 660):
+        parts.append(f'<path d="M{x} {y + 21} H{x + 30}" fill="none" stroke="#536966" stroke-width="1.5" marker-end="url(#lane-arrow)"/>')
+    parts.append(f'<path d="M830 {y + 21} H860" fill="none" stroke="#536966" stroke-width="1.5" stroke-dasharray="3 3" marker-end="url(#lane-arrow)"/>')
+    parts.append(f'<text x="845" y="{y + 54}" font-size="9" fill="#52605f">labels for description only</text>')
+    return parts
+
+
+def _render_diagrams(config: dict[str, Any], explore_ran: bool = False) -> str:
     design = config.get("design", {})
     selected = set(config.get("models", []))
     specs = config.get("model_specs", {})
@@ -597,9 +725,10 @@ def _render_diagrams(config: dict[str, Any]) -> str:
         for x in (150, 320, 490, 660, 830):
             lane_parts.append(f'<path d="M{x} {y + 21} H{x + 30}" fill="none" stroke="#536966" '
                               'stroke-width="1.5" marker-end="url(#lane-arrow)"/>')
+    lane_parts.extend(_render_exploration_lane(72 + len(available) * 66, explore_ran))
     lane_parts.append('</g>')
-    pipeline_height = 72 + len(available) * 66
-    pipeline = (f'<div class="diagram"><p class="diagram-label">Per-model pipeline; solid lanes ran, dashed lanes were not selected</p>'
+    pipeline_height = 72 + (len(available) + 1) * 66 + 6
+    pipeline = (f'<div class="diagram"><p class="diagram-label">Per-model pipeline; solid lanes ran, dashed lanes were not selected or not run</p>'
                 f'<svg viewBox="0 0 1000 {pipeline_height}" role="img" aria-label="Per-model pipeline lanes">'
                 f'{"".join(lane_parts)}</svg></div>')
     lineage = '''<div class="diagram"><p class="diagram-label">Data lineage · predictors and target come from disjoint time ranges</p><svg viewBox="0 0 1040 190" role="img" aria-label="Data lineage diagram"><defs><marker id="arrow2" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#536966"/></marker></defs><g font-family="Segoe UI, sans-serif" font-size="13" text-anchor="middle"><rect x="24" y="48" width="190" height="78" rx="5" fill="#eef2ed" stroke="#8b9a91"/><text x="119" y="78" fill="#1c2727"><tspan>Raw patient file</tspan><tspan x="119" dy="20">values + labels</tspan></text><rect x="300" y="24" width="235" height="66" rx="5" fill="#e4f1ed" stroke="#167b73" stroke-width="2"/><text x="417" y="51" fill="#1c2727"><tspan>Rows 0–5</tspan><tspan x="417" dy="19">clinical inputs only</tspan></text><rect x="300" y="108" width="235" height="58" rx="5" fill="#fbebe7" stroke="#c45042" stroke-width="2"/><text x="417" y="132" fill="#1c2727"><tspan>Row 6 onward</tspan><tspan x="417" dy="18">outcome labels only</tspan></text><rect x="642" y="48" width="174" height="78" rx="5" fill="#fff0d9" stroke="#d89a38" stroke-width="2"/><text x="729" y="78" fill="#1c2727"><tspan>Join by patient</tspan><tspan x="729" dy="20">after eligibility</tspan></text><rect x="880" y="48" width="142" height="78" rx="5" fill="#e9e6f0" stroke="#745d92" stroke-width="2"/><text x="951" y="78" fill="#1c2727"><tspan>Saved test</tspan><tspan x="951" dy="20">predictions</tspan></text><path d="M215 86 H290 M535 56 C580 56 590 70 632 80 M535 137 C580 137 590 105 632 94 M817 86 H870" fill="none" stroke="#536966" stroke-width="2" marker-end="url(#arrow2)"/><text x="520" y="184" fill="#52605f">Patient ID is lineage metadata, never an input feature · SepsisLabel is target-only</text></g></svg></div>'''

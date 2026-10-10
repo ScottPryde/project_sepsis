@@ -68,6 +68,22 @@ sepsis-pipeline run --cache .\data\cache\physionet2019.parquet --output-dir .\ou
 
 In hospital mode, fit and validation patients come only from `--train-sources`; `--test-size` is ignored.
 
+### Unsupervised exploration
+
+`explore` looks for structure in the six-hour look-back without the outcome, then describes what it finds against the outcome:
+
+```powershell
+sepsis-pipeline explore --cache .\data\cache\physionet2019.parquet --output-dir .\outputs\physionet\pooled
+```
+
+Point `--output-dir` at a completed `run` directory to reuse its `split_patients.json`, so exploration describes the same test patients as the supervised models; `--horizon-hours` must match that run. Without one, `explore` makes the same seeded split (`--split-mode` options apply) and saves it under `explore/`.
+
+All steps are fitted on fit patients using features only: median imputation and scaling (constant and duplicate columns dropped, scaled values capped at ±10 SD because no range checks run upstream and PhysioNet contains implausible entries such as FiO2 = 4000), PCA to 90% variance (at most 20 components), k-means (k chosen by silhouette) and a Gaussian mixture (k chosen by BIC) for `--k-range 2 8`, and a 300-tree Isolation Forest. Cluster stability is the mean adjusted Rand index of `--stability-resamples 50` bootstrap refits, compared on validation patients; below 0.6 is flagged unstable. Test patients are then assigned, and each cluster's sepsis rate (Wilson 95% interval), key-variable medians, missingness, hospital share, and median record length are reported. The Isolation Forest score is evaluated as an unsupervised baseline with bootstrap AUROC and AUPRC.
+
+`--feature-sets all measured` (the default) runs everything twice: once on all features and once without missingness indicators, because which tests were ordered can dominate the structure. `--methods` adds `umap` for a picture-only 2-D view when `pip install -e ".[explore]"` is installed; without it, PCA views are used and the config says so.
+
+Outputs go to `<output-dir>/explore/`: `explore_config.json`, `explore_summary.json`, and per feature set `embedding_test.csv`, `embedding.png`, `pca_explained_variance.csv`, `pca_top_loadings.csv`, `k_selection.csv`, `k_selection.png`, `cluster_profiles_kmeans.csv`, `cluster_profiles_gmm.csv`, and `anomaly_scores.csv`. The run's `report.html` is regenerated with an "Unsupervised exploration" section. Clusters are statistical groupings, not clinical phenotypes.
+
 Summarise completed runs side by side, for example the synthetic demo against the real-data runs:
 
 ```powershell

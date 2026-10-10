@@ -218,6 +218,16 @@ Branch `feature/physionet-integration`:
 - [x] A7: `compare` command writing CSVs and a self-contained `comparison.html`
 - [ ] A8: pooled, A→B and B→A done (tabular models); still to run: CNN on pooled, `pooled_h12` sensitivity run
 
+Branch `feature/unsupervised-explore` (off `256e0d2`):
+
+- [x] B1: `explore` command; reuses `split_patients.json` (and checks the horizon matches) or makes the same seeded split; fit-only preprocessing that drops constant and duplicate columns and caps scaled values at ±10 SD
+- [x] B2: PCA (90% variance, at most 20 components); optional UMAP with a fallback recorded in the config; `explore` extra
+- [x] B3: k-means (silhouette) and Gaussian mixture (BIC); stability as bootstrap ARI on validation patients; cluster profiles with Wilson intervals, key medians, missingness, hospital share, record length; chi-square only when expected counts are at least 5; k at the edge of the range is flagged
+- [x] B4: Isolation Forest scored with the new public `evaluation.score_with_bootstrap`
+- [x] B5: "Unsupervised exploration" report section and an exploration lane in the pipeline diagram
+- [x] B6: `tests/test_unsupervised.py` (planted clusters, fit-only, label blindness, reproducibility, shared split, one-class, UMAP optional, CLI artifacts, report); README; real-data run
+- [ ] B7: sequence autoencoder (stretch, not started)
+
 Measured on the full data: building the cache takes 400 s once (16 MB file); `validate` from the cache takes 35 s, and `eda` 58 s.
 
 ## Data and citation

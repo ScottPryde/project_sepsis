@@ -21,6 +21,7 @@ dev = ["pytest>=7.4"]
 cnn = ["torch>=2.2"]
 xgboost = ["xgboost>=2.0"]
 data = ["pyarrow>=15"]
+explore = ["umap-learn>=0.5"]
 
 [project.scripts]
 sepsis-pipeline = "sepsis_prediction.cli:main"

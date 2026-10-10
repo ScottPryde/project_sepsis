@@ -15,18 +15,50 @@ import pandas as pd
 from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_score
 
 
-def _metric_pair(y: np.ndarray, probabilities: np.ndarray) -> tuple[float | None, float | None]:
+def metric_pair(y: np.ndarray, probabilities: np.ndarray) -> tuple[float | None, float | None]:
     if np.unique(y).size != 2:
         return None, None
     return float(average_precision_score(y, probabilities)), float(roc_auc_score(y, probabilities))
 
 
-def _interval(values: np.ndarray) -> list[float | None]:
+def bootstrap_interval(values: np.ndarray) -> list[float | None]:
     finite = values[np.isfinite(values)]
     if finite.size < 20:
         return [None, None]
     low, high = np.percentile(finite, [2.5, 97.5])
     return [float(low), float(high)]
+
+
+def score_with_bootstrap(
+    y: np.ndarray,
+    scores: np.ndarray,
+    *,
+    n_bootstrap: int = 1000,
+    seed: int = 42,
+) -> dict[str, Any]:
+    """AUROC and AUPRC of any ranking score, with percentile bootstrap intervals over patients."""
+    y = np.asarray(y, dtype=int)
+    scores = np.asarray(scores, dtype=float)
+    auprc, auroc = metric_pair(y, scores)
+    samples = {"auprc": np.full(n_bootstrap, np.nan), "auroc": np.full(n_bootstrap, np.nan)}
+    if auroc is not None:
+        rng = np.random.default_rng(seed)
+        for index in range(n_bootstrap):
+            sample = rng.integers(0, len(y), len(y))
+            if np.unique(y[sample]).size != 2:
+                continue
+            samples["auprc"][index], samples["auroc"][index] = metric_pair(y[sample], scores[sample])
+    return {
+        "n": int(len(y)),
+        "positives": int(y.sum()),
+        "prevalence": float(y.mean()) if len(y) else None,
+        "auroc": auroc,
+        "auroc_ci": bootstrap_interval(samples["auroc"]),
+        "auprc": auprc,
+        "auprc_ci": bootstrap_interval(samples["auprc"]),
+        "n_bootstrap": n_bootstrap,
+        "bootstrap_seed": seed,
+    }
 
 
 def _operating_point(y: np.ndarray, probabilities: np.ndarray, threshold: float) -> dict[str, float | None]:
@@ -110,20 +142,20 @@ def compare_models(
             if np.unique(y[sample]).size != 2:
                 continue
             for name in names:
-                ap, auc = _metric_pair(y[sample], probabilities[name][sample])
+                ap, auc = metric_pair(y[sample], probabilities[name][sample])
                 bootstrap[name]["auprc"][index] = ap
                 bootstrap[name]["auroc"][index] = auc
 
     rows: list[dict[str, Any]] = []
     for name in names:
-        ap, auc = _metric_pair(y, probabilities[name])
+        ap, auc = metric_pair(y, probabilities[name])
         threshold = float(thresholds.get(name, fallback_threshold))
         rows.append({
             "model": name,
             "auprc": ap,
-            "auprc_ci": _interval(bootstrap[name]["auprc"]),
+            "auprc_ci": bootstrap_interval(bootstrap[name]["auprc"]),
             "auroc": auc,
-            "auroc_ci": _interval(bootstrap[name]["auroc"]),
+            "auroc_ci": bootstrap_interval(bootstrap[name]["auroc"]),
             "operating_point": _operating_point(y, probabilities[name], threshold),
             "calibration": _calibration(y, probabilities[name]),
         })
@@ -140,7 +172,7 @@ def compare_models(
             differences = bootstrap[best_name]["auprc"] - bootstrap[name]["auprc"]
             row["vs_top"] = {
                 "auprc_difference": rows[0]["auprc"] - row["auprc"],
-                "auprc_difference_ci": _interval(differences),
+                "auprc_difference_ci": bootstrap_interval(differences),
             }
 
     curve_thresholds = np.round(np.arange(0.01, 0.51, 0.01), 2)
