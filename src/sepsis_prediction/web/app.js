@@ -169,6 +169,69 @@ async function pollJob(model) {
   await refreshResults();
 }
 
+async function refreshReview() {
+  const response = await fetch("/api/review", { cache: "no-store" });
+  if (!response.ok) return;
+  const review = await response.json();
+  const status = review.status ?? {};
+  const running = status.state === "running";
+  const button = document.getElementById("run-review");
+  button.disabled = running || !review.can_run || currentJob?.state === "running";
+  document.getElementById("review-status").textContent = running
+    ? `Running · ${formatElapsed(status.elapsed_seconds ?? 0)}`
+    : status.state === "failed" ? "Review failed"
+      : review.available ? `Updated ${review.updated_at}` : "Not run yet";
+  if (!review.available) return;
+  const dataset = review.dataset ?? {};
+  const tiles = [
+    [dataset.patients, "patients"],
+    [dataset.rows, "hourly rows"],
+    [dataset.fields, "fields reviewed"],
+    [review.fields_flagged, "fields with flags"],
+    [review.implausible_values, "implausible values"],
+    [review.recommendations, "recommendations"],
+  ];
+  document.getElementById("review-summary").innerHTML = tiles
+    .map(([value, label]) => `<div class="metric"><strong>${escapeHtml((value ?? 0).toLocaleString())}</strong><span>${escapeHtml(label)}</span></div>`)
+    .join("");
+  const rows = (review.rules ?? [])
+    .map((rule) => `<tr><td>${escapeHtml(rule.rule_id)}</td><td>${escapeHtml(rule.title)}</td><td>${escapeHtml((rule.values_changed ?? 0).toLocaleString())}</td><td>${escapeHtml((rule.patients_affected ?? 0).toLocaleString())}</td></tr>`)
+    .join("");
+  document.getElementById("review-rules").innerHTML = rows
+    ? `<table><thead><tr><th>Quality rule</th><th>Finding</th><th>Values changed</th><th>Patients</th></tr></thead><tbody>${rows}</tbody></table>`
+    : "";
+}
+
+async function runReview() {
+  const response = await fetch(`/api/run/data_review`, { method: "POST" });
+  const payload = await response.json();
+  if (!response.ok) {
+    window.alert(payload.error ?? "Another job is already running.");
+    return;
+  }
+  currentJob = { state: "running", active_model: "data_review" };
+  await refreshReview();
+  await pollReview();
+}
+
+async function pollReview() {
+  const response = await fetch("/api/status", { cache: "no-store" });
+  const status = await response.json();
+  await refreshReview();
+  if (status.active_model === "data_review" && status.state === "running") {
+    window.setTimeout(pollReview, 1000);
+    return;
+  }
+  currentJob = status;
+  await refreshResults();
+  await refreshReview();
+}
+
+document.getElementById("run-review").addEventListener("click", runReview);
+refreshReview().catch(() => {
+  document.getElementById("review-status").textContent = "Review status unavailable";
+});
+
 refreshResults().catch((error) => {
   document.getElementById("model-grid").innerHTML = `<p class="empty">${escapeHtml(error.message)}</p>`;
 });

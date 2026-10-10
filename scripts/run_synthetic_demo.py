@@ -24,6 +24,7 @@ def main() -> None:
         default=None,
         help="run one model only; the CNN uses Logistic Regression for its shared split",
     )
+    parser.add_argument("--review-only", action="store_true", help="only write the data review")
     args = parser.parse_args()
     project_root = Path(__file__).resolve().parents[1]
     output_dir = args.output_dir or project_root / "outputs" / "synthetic_e2e"
@@ -88,8 +89,22 @@ def main() -> None:
             frame.to_csv(source_dirs[source] / f"{prefix}{patient:05d}.psv", sep="|", index=False)
         data_arguments = ["--data-dir", *(str(source_dir) for source_dir in source_dirs)]
 
+        review_command = [
+            sys.executable, "-m", "sepsis_prediction.cli", "review",
+            *data_arguments, "--output-dir", str(output_dir / "data_review"),
+        ]
+        if args.review_only:
+            result = subprocess.run(review_command, cwd=project_root, text=True, capture_output=True)
+            print(result.stdout.strip()[-2000:])
+            if result.returncode:
+                print(result.stderr.strip())
+                raise subprocess.CalledProcessError(result.returncode, review_command)
+            print(f"Data review: {output_dir / 'data_review' / 'data_review.html'}")
+            return
+
         commands = []
         if args.model is None:
+            commands.append(review_command)
             commands.extend([
                 [sys.executable, "-m", "sepsis_prediction.cli", "validate", *data_arguments],
                 [

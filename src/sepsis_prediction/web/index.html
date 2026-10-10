@@ -52,6 +52,9 @@ li { margin:4px 0; }
 details { margin-top:12px; padding:12px; background:#fff; border:1px solid var(--line); }
 summary { cursor:pointer; font-weight:700; }
 iframe { display:block; width:100%; height:78vh; margin-top:12px; border:1px solid var(--line); background:#fff; }
+.button-link { display:inline-block; padding:8px 14px; margin-right:8px; border:1px solid #167b73; border-radius:4px; color:#167b73; background:#fff; text-decoration:none; font-weight:600; }
+.button-link:hover { background:#e4f1ed; }
+#review-rules table { width:100%; border-collapse:collapse; font-size:13px; background:#fff; } #review-rules th, #review-rules td { padding:7px 10px; border-bottom:1px solid #e6eae7; text-align:left; }
 .empty { padding:18px; color:var(--muted); background:#fff; border:1px dashed var(--line); }
 @media(max-width:600px) { header { padding:18px; } .chart-grid { grid-template-columns:1fr; } }
 </style>
@@ -80,13 +83,21 @@ iframe { display:block; width:100%; height:78vh; margin-top:12px; border:1px sol
           <li>Require present known clinical/context fields to be numeric where observed.</li>
           <li>When ICULOS is present, require numeric values increasing by one row; never use it as a predictor.</li>
         </ul>
-        <p class="muted">No physiologic range validation, unit normalization, or outlier correction is applied. Without ICULOS, hourly continuity is assumed from row order.</p>
+        <p class="muted">After loading, the standard quality rules (Q1-Q6) remove implausible values, ionised calcium mixed into total calcium, inverted blood pressures, impossible bilirubin pairs, and carried-forward lab copies, and recode top-coded ages. Labels and ICU time are never changed. Without ICULOS, hourly continuity is assumed from row order.</p>
       </article>
       <article class="source-panel">
         <h3>Processing</h3>
         <p>Files are discovered by <code>*.psv</code> and sorted by filename. Each file is parsed with the pipe delimiter and its filename stem becomes the patient key. Cohort construction uses rows 0–5 as input, a bounded outcome horizon, stratified fit/validation/test partitions, and fit-only preprocessing.</p>
       </article>
     </div>
+  </section>
+
+  <section aria-labelledby="review-heading">
+    <h2 id="review-heading">Data review and quality rules</h2>
+    <p class="lede">A field-by-field review of the raw records: completeness, cadence, distributions, plausibility, hospital differences, cross-field consistency, and the impact of each quality rule. Model runs apply the standard quality rules after loading.</p>
+    <div class="actions"><a class="button-link" href="/data-review.html">Open data review</a><button type="button" id="run-review">Run data review</button><span class="job-status" id="review-status" aria-live="polite">Checking…</span></div>
+    <div id="review-summary" class="summary-grid"><p class="empty">No data review has been generated yet.</p></div>
+    <div id="review-rules"></div>
   </section>
 
   <section aria-labelledby="study-heading">

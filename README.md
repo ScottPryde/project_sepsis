@@ -68,6 +68,29 @@ sepsis-pipeline run --cache .\data\cache\physionet2019.parquet --output-dir .\ou
 
 In hospital mode, fit and validation patients come only from `--train-sources`; `--test-size` is ignored.
 
+### Data review and quality rules
+
+Review the raw records field by field before any cleaning:
+
+```powershell
+sepsis-pipeline review --cache .\data\cache\physionet2019.parquet --output-dir .\outputs\physionet\data_review
+```
+
+This writes `data_review.html` (one self-contained page), `data_review.json`, `field_summary.csv`, and `charts/`. The page opens with the rationale for each test and a pipeline diagram, then has generated recommendations, a field summary, and a collapsible section per field. Each field section covers completeness and measurement cadence, distribution, hard plausibility limits with example rows, outliers beyond 3× IQR, repeated consecutive values, a hospital comparison (Kolmogorov-Smirnov distance), and the descriptive association of its six-hour summary with the cohort outcome. Cross-field checks (DBP ≤ MAP ≤ SBP, Hct ≈ 3 × Hgb, direct ≤ total bilirubin, pH against bicarbonate and PaCO2, pulse against arterial saturation) and record-level checks follow, with the count each quality rule would change. In the application, **Open data review** shows the page and **Run data review** regenerates it.
+
+`eda`, `run`, and `explore` apply `--quality-rules standard` by default after loading (`none` turns them off). The rules, defined in `quality.py` and justified in the review, are:
+
+| Rule | Change |
+|---|---|
+| Q1 | Calcium 0.5–2.0 (ionised calcium in mmol/L, found at hospital B) set to missing |
+| Q2 | Values outside wide hard plausibility limits (for example FiO2 outside 0.21–1.0, potassium above 10) set to missing |
+| Q3 | Rows with DBP above SBP: SBP, DBP and MAP set to missing |
+| Q4 | Direct bilirubin above total bilirubin: direct set to missing |
+| Q5 | Age 100 (top-coded; no ages 90–99 exist) recoded to 90 |
+| Q6 | Lab values identical to the previous hour's value (copied forward, mainly at hospital A) set to missing; FiO2 excluded |
+
+`SepsisLabel` and `ICULOS` are never changed, so cohorts and outcomes are identical with or without rules. Each command writes `quality_audit.json`, `run_config.json` records the ruleset and counts, and the report's datasource section lists every rule's impact. `explore` refuses to reuse a run made with a different ruleset.
+
 ### Unsupervised exploration
 
 `explore` looks for structure in the six-hour look-back without the outcome, then describes what it finds against the outcome:
@@ -111,7 +134,8 @@ Start the JavaScript application from the project environment with `.\.venv\Scri
 ## Outputs
 
 - The `serve` command opens the JavaScript pipeline application. Its model panels can run Logistic Regression, Random Forest, XGBoost, or the CNN independently, with completion timing, metrics, feature signals, and model-specific charts. A full generated report remains available in the application and as `report.html`.
-- The report describes the PhysioNet 2019 PSV datasource, sorted file ingestion, required target checks, numeric field validation, optional fields, and `ICULOS` continuity checks. Physiologic range validation and unit normalization are not performed.
+- The report describes the PhysioNet 2019 PSV datasource, sorted file ingestion, required target checks, numeric field validation, optional fields, `ICULOS` continuity checks, and the data quality rules applied with their audited impact.
+- `quality_audit.json`: the ruleset and, per rule, values, rows, and patients changed, by field and hospital.
 - `cohort_summary.json`: eligible outcome counts, prevalence, configured horizon, and exclusion counts (including incomplete negative follow-up), overall and per source, plus the distribution of `ICULOS` at row 0.
 - `cohort_audit.csv`: one row per loaded patient with source, record length, `ICULOS` at row 0, cohort status or exclusion reason, and outcome.
 - `metrics.json`: AUROC, average precision/AUPRC, sensitivity, specificity, precision, F1, accuracy, Brier score, validation-selected threshold, and confusion matrix. AUROC/AUPRC are `null` if the test split has only one class.

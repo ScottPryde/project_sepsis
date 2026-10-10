@@ -92,7 +92,7 @@ def test_cli_run_ingests_psv_and_writes_cohort_and_model_artifacts(tmp_path, mon
     assert "constructed separability" in report
     assert "Datasource, ingestion, and field validation" in report
     assert "SepsisLabel" in report
-    assert "No physiologic range checks" in report
+    assert "Data quality rules (standard)" in report
     assert "validation patients" in report
     assert (output_dir / "model_evaluation.json").is_file()
     assert (output_dir / "model_ranking.csv").is_file()

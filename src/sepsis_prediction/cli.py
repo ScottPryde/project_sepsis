@@ -10,6 +10,8 @@ import pandas as pd
 
 from sepsis_prediction.cnn import run_cnn_experiment
 from sepsis_prediction.comparison import parse_run_arguments, write_run_comparison
+from sepsis_prediction.data_review import run_data_review
+from sepsis_prediction.quality import RULESETS, apply_quality_rules
 from sepsis_prediction.data import TARGET_COLUMN, load_patient_files, read_record_cache, write_record_cache
 from sepsis_prediction.eda import run_eda
 from sepsis_prediction.features import (
@@ -58,6 +60,7 @@ def _parser() -> argparse.ArgumentParser:
     eda = commands.add_parser("eda", help="write dataset summaries and exploratory plots")
     _add_data_source(eda)
     eda.add_argument("--output-dir", type=Path, default=Path("eda"))
+    _add_quality_option(eda)
 
     run = commands.add_parser("run", help="build the cohort, train baselines, and save artifacts")
     _add_data_source(run)
@@ -88,6 +91,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--cnn", action="store_true", help="also train the optional PyTorch 1D CNN")
     run.add_argument("--cnn-epochs", type=int, default=20)
     _add_split_options(run)
+    _add_quality_option(run)
 
     serve = commands.add_parser("serve", help="serve the JavaScript pipeline application")
     _add_data_source(serve, required=False)
@@ -108,6 +112,15 @@ def _parser() -> argparse.ArgumentParser:
     serve.add_argument("--cnn", action="store_true")
     serve.add_argument("--cnn-epochs", type=int, default=20)
     _add_split_options(serve)
+    _add_quality_option(serve)
+
+    review = commands.add_parser(
+        "review", help="field-by-field review of the raw data, with quality-rule impact, as an HTML page",
+    )
+    _add_data_source(review)
+    review.add_argument("--output-dir", type=Path, default=Path("outputs/data_review"))
+    review.add_argument("--horizon-hours", type=int, default=DEFAULT_HORIZON_HOURS)
+    review.add_argument("--random-state", type=int, default=42)
 
     explore = commands.add_parser(
         "explore", help="label-blind PCA, clustering, and anomaly detection, described against the outcome",
@@ -126,6 +139,7 @@ def _parser() -> argparse.ArgumentParser:
     explore.add_argument("--validation-size", type=float, default=0.2)
     explore.add_argument("--horizon-hours", type=int, default=DEFAULT_HORIZON_HOURS)
     _add_split_options(explore)
+    _add_quality_option(explore)
 
     compare = commands.add_parser("compare", help="summarise completed runs side by side")
     compare.add_argument(
@@ -142,13 +156,37 @@ def _load_records(args: argparse.Namespace):
     return load_patient_files(args.data_dir)
 
 
+def _clean_records(args: argparse.Namespace, records):
+    """Apply the selected quality ruleset and save its audit next to the command's outputs."""
+    ruleset = getattr(args, "quality_rules", "none")
+    cleaned, audit = apply_quality_rules(records, ruleset)
+    output_dir = getattr(args, "output_dir", None)
+    if output_dir is not None:
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        (Path(output_dir) / "quality_audit.json").write_text(json.dumps(audit, indent=2) + "\n", encoding="utf-8")
+    return cleaned, audit
+
+
+def _add_quality_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--quality-rules", choices=sorted(RULESETS), default="standard",
+        help="data quality rules applied after loading (default: standard; see the data review)",
+    )
+
+
 def _explore(args, records, features, labels, groups, sources) -> None:
     output_dir: Path = args.output_dir
     split_path = output_dir / "split_patients.json"
     if split_path.is_file():
         run_config_path = output_dir / "run_config.json"
         if run_config_path.is_file():
-            run_horizon = json.loads(run_config_path.read_text(encoding="utf-8")).get("design", {}).get("horizon_hours")
+            saved_config = json.loads(run_config_path.read_text(encoding="utf-8"))
+            run_ruleset = saved_config.get("quality", {}).get("ruleset")
+            if run_ruleset is not None and run_ruleset != args.quality_rules:
+                raise SystemExit(
+                    f"{output_dir} was run with --quality-rules {run_ruleset}; pass the same value to explore",
+                )
+            run_horizon = saved_config.get("design", {}).get("horizon_hours")
             if run_horizon is not None and run_horizon != args.horizon_hours:
                 raise SystemExit(
                     f"{output_dir} was run with --horizon-hours {run_horizon}; pass the same value to explore",
@@ -182,7 +220,7 @@ def _explore(args, records, features, labels, groups, sources) -> None:
         stability_resamples=args.stability_resamples,
         random_state=args.random_state,
         split_origin=split_origin,
-        run_settings={"horizon_hours": args.horizon_hours, "split_mode": args.split_mode},
+        run_settings={"horizon_hours": args.horizon_hours, "split_mode": args.split_mode, "quality_rules": args.quality_rules},
     )
     report_path = write_html_report(output_dir, records=records, features=features)
     print(json.dumps({
@@ -216,6 +254,7 @@ def main() -> None:
                 "cnn": args.cnn,
                 "cnn_epochs": args.cnn_epochs,
                 "split_mode": args.split_mode,
+                "quality_rules": args.quality_rules,
                 "train_sources": list(args.train_sources),
                 "test_sources": list(args.test_sources),
             },
@@ -243,6 +282,18 @@ def main() -> None:
         return
 
     records = _load_records(args)
+    if args.command == "review":
+        review = run_data_review(
+            records, args.output_dir, horizon_hours=args.horizon_hours, random_state=args.random_state,
+        )
+        print(json.dumps({
+            "dataset": review["dataset"],
+            "fields_flagged": {name: item["flags"] for name, item in review["fields"].items() if item["flags"]},
+            "rule_impact": [{key: rule[key] for key in ("rule_id", "values_changed", "patients_affected")}
+                            for rule in review["rule_impact"]],
+            "page": str(args.output_dir / "data_review.html"),
+        }, indent=2))
+        return
     if args.command == "validate":
         report = {
             "patients": len(records),
@@ -256,6 +307,8 @@ def main() -> None:
         print(json.dumps(report, indent=2))
         return
 
+    if args.command in ("eda", "run", "explore"):
+        records, quality_audit = _clean_records(args, records)
     if args.command == "eda":
         summary = run_eda(records, args.output_dir)
         report_path = write_html_report(args.output_dir, records=records)
@@ -289,11 +342,17 @@ def main() -> None:
         train_sources=tuple(args.train_sources),
         test_sources=tuple(args.test_sources),
     )
+    config_path = args.output_dir / "run_config.json"
+    run_config = json.loads(config_path.read_text(encoding="utf-8"))
+    run_config["quality"] = {
+        key: quality_audit[key] for key in ("ruleset", "values_changed", "observed_values") if key in quality_audit
+    } | {"rules": [
+        {key: rule[key] for key in ("rule_id", "action", "values_changed", "patients_affected")}
+        for rule in quality_audit.get("rules", [])
+    ]}
     if args.synthetic_demo:
-        config_path = args.output_dir / "run_config.json"
-        run_config = json.loads(config_path.read_text(encoding="utf-8"))
         run_config["synthetic_demo"] = True
-        config_path.write_text(json.dumps(run_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    config_path.write_text(json.dumps(run_config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     if args.cnn:
         sequences, sequence_labels, sequence_groups, sequence_exclusions = create_sequence_examples(
             records, horizon_hours=args.horizon_hours,

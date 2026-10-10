@@ -228,6 +228,13 @@ Branch `feature/unsupervised-explore` (off `256e0d2`):
 - [x] B6: `tests/test_unsupervised.py` (planted clusters, fit-only, label blindness, reproducibility, shared split, one-class, UMAP optional, CLI artifacts, report); README; real-data run
 - [ ] B7: sequence autoencoder (stretch, not started)
 
+Branch `feature/data-quality` (off `72607d6`):
+
+- [x] `review` command and `data_review.py`: field-by-field review page (introduction with test rationale and pipeline diagram, recommendations, collapsible field sections, cross-field and record-level checks, rule impact)
+- [x] `quality.py`: field specs with hard limits and rules Q1-Q6, applied by default in `eda`, `run`, `explore`; audited in `quality_audit.json`, `run_config.json`, and the report
+- [x] Application: "Data review and quality rules" section, `/data-review.html`, `/api/review`, and a Run data review job
+- [x] End-to-end rerun on PhysioNet with the standard rules; pre-rule results kept in `outputs/physionet/no_rules/`
+
 Measured on the full data: building the cache takes 400 s once (16 MB file); `validate` from the cache takes 35 s, and `eda` 58 s.
 
 ## Data and citation

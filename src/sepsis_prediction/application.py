@@ -22,6 +22,12 @@ from sepsis_prediction.reporting import write_html_report
 
 MODEL_IDS = ("logistic_regression", "random_forest", "xgboost", "cnn_1d")
 CHART_FILES = {"model_curves.png", "model_forest.png", "calibration.png", "decision_curve.png"}
+REVIEW_JOB = "data_review"
+REVIEW_PLACEHOLDER = """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Data review</title>
+<style>body{font-family:"Segoe UI",sans-serif;max-width:720px;margin:60px auto;color:#1c2727;line-height:1.5}</style></head>
+<body><h1>No data review yet</h1><p>Use <strong>Run data review</strong> in the application, or run
+<code>sepsis-pipeline review --cache data/cache/physionet2019.parquet --output-dir &lt;output-dir&gt;/data_review</code>.</p>
+<p><a href="/">Back to the pipeline application</a></p></body></html>"""
 
 
 class _ApplicationHandler(BaseHTTPRequestHandler):
@@ -58,6 +64,14 @@ class _ApplicationHandler(BaseHTTPRequestHandler):
             self._send_json(200, status)
         elif path == "/api/results":
             self._send_json(200, self._results_payload())
+        elif path == "/data-review.html":
+            page = self.review_dir / "data_review.html"
+            if page.is_file():
+                self._send_file(page, "text/html; charset=utf-8", no_store=True)
+            else:
+                self._send_bytes(200, REVIEW_PLACEHOLDER.encode("utf-8"), "text/html; charset=utf-8")
+        elif path == "/api/review":
+            self._send_json(200, self._review_payload())
         elif path.startswith("/assets/"):
             self._serve_chart(path)
         else:
@@ -172,6 +186,29 @@ class _ApplicationHandler(BaseHTTPRequestHandler):
             "job_status": job_status,
         }
 
+    def _review_payload(self) -> dict[str, Any]:
+        review = self._read_json(self.review_dir / "data_review.json")
+        page = self.review_dir / "data_review.html"
+        fields = review.get("fields", {})
+        return {
+            "available": page.is_file() and bool(review),
+            "updated_at": datetime.fromtimestamp(page.stat().st_mtime).isoformat(timespec="minutes")
+            if page.is_file() else None,
+            "dataset": review.get("dataset", {}),
+            "fields_flagged": sum(1 for item in fields.values() if item.get("flags")),
+            "implausible_values": sum(
+                sum(item.get("implausible", {}).get(key, 0) for key in ("below", "above", "not_allowed"))
+                for item in fields.values()
+            ),
+            "rules": [
+                {key: rule.get(key) for key in ("rule_id", "title", "values_changed", "patients_affected")}
+                for rule in review.get("rule_impact", [])
+            ],
+            "recommendations": len(review.get("recommendations", [])),
+            "can_run": REVIEW_JOB in self.commands,
+            "status": self._status_for(REVIEW_JOB) if REVIEW_JOB in self.model_dirs else {"state": "idle"},
+        }
+
     def _status_for(self, model: str) -> dict[str, Any]:
         handler_type = type(self)
         with handler_type.job_lock:
@@ -179,8 +216,9 @@ class _ApplicationHandler(BaseHTTPRequestHandler):
         if status.get("active_model") != model:
                 run_dir = self._model_run_dir(model)
                 duration = self._read_json(self.model_dirs[model] / "run_duration.json")
+                done_file = "data_review.html" if model == REVIEW_JOB else "metrics.json"
                 return {
-                    "state": "complete" if (run_dir / "metrics.json").exists() else "idle",
+                    "state": "complete" if (run_dir / done_file).exists() else "idle",
                     "elapsed_seconds": duration.get("elapsed_seconds"),
                 }
         started_at = status.get("started_at")
@@ -191,6 +229,8 @@ class _ApplicationHandler(BaseHTTPRequestHandler):
         return status
 
     def _model_run_dir(self, model: str) -> Path:
+        if model == REVIEW_JOB:
+            return self.review_dir
         candidate = self.model_dirs[model]
         if (candidate / "metrics.json").exists():
             return candidate
@@ -264,9 +304,11 @@ class _ApplicationHandler(BaseHTTPRequestHandler):
         self.wfile.write(content)
 
     def _send_json(self, status_code: int, value: dict[str, Any]) -> None:
-        content = json.dumps(value, allow_nan=False).encode("utf-8")
+        self._send_bytes(status_code, json.dumps(value, allow_nan=False).encode("utf-8"), "application/json; charset=utf-8")
+
+    def _send_bytes(self, status_code: int, content: bytes, content_type: str) -> None:
         self.send_response(status_code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(content)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
@@ -283,6 +325,7 @@ def create_application_server(
     synthetic_demo: bool,
     host: str = "127.0.0.1",
     port: int = 8765,
+    review_dir: str | Path | None = None,
 ) -> ThreadingHTTPServer:
     try:
         if not ipaddress.ip_address(host).is_loopback:
@@ -296,6 +339,7 @@ def create_application_server(
         "model_dirs": {name: Path(path).resolve() for name, path in model_dirs.items()},
         "commands": {name: list(command) for name, command in commands.items()},
         "fallback_dir": Path(fallback_dir).resolve(),
+        "review_dir": Path(review_dir if review_dir is not None else Path(output_dir) / "data_review").resolve(),
         "synthetic_demo": synthetic_demo,
         "job_lock": threading.Lock(),
         "job_status": {"state": "idle", "active_model": None, "returncode": None, "logs": ""},
@@ -360,6 +404,7 @@ def serve_application(
         ]
         if options.get("threshold") is not None:
             command.extend(["--threshold", str(options["threshold"])])
+        command.extend(["--quality-rules", options.get("quality_rules", "standard")])
         if options.get("split_mode", "pooled") == "hospital":
             command.extend([
                 "--split-mode", "hospital",
@@ -370,9 +415,24 @@ def serve_application(
             command.extend(["--cnn", "--cnn-epochs", str(options.get("cnn_epochs", 20))])
         commands[model] = command
 
+    review_dir = output / "data_review"
+    model_dirs[REVIEW_JOB] = review_dir
+    if synthetic_demo:
+        commands[REVIEW_JOB] = [
+            sys.executable, str(project_root / "scripts" / "run_synthetic_demo.py"),
+            "--output-dir", str(output), "--review-only",
+        ]
+    else:
+        commands[REVIEW_JOB] = [
+            sys.executable, "-m", "sepsis_prediction.cli", "review", *data_arguments,
+            "--output-dir", str(review_dir),
+            "--horizon-hours", str(options.get("horizon_hours", 24)),
+            "--random-state", str(options.get("random_state", 42)),
+        ]
+
     server = create_application_server(
         output, report_path, model_dirs, commands, fallback_dir,
-        Path(__file__).resolve().parent / "web", synthetic_demo, host, port,
+        Path(__file__).resolve().parent / "web", synthetic_demo, host, port, review_dir=review_dir,
     )
     print(f"Sepsis pipeline application: http://{host}:{server.server_port}/")
     try:

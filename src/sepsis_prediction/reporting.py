@@ -104,7 +104,9 @@ def write_html_report(
     cohort = _read_json(output / "cohort_summary.json", {})
     dataset = _read_json(output / "dataset_summary.json", {})
     config = _read_json(output / "run_config.json", {})
-    comparison = pd.read_csv(output / "model_comparison.csv") if (output / "model_comparison.csv").exists() else pd.DataFrame()
+    if "quality" not in config:
+        config["quality"] = _read_json(output / "quality_audit.json", {})
+    comparison =pd.read_csv(output / "model_comparison.csv") if (output / "model_comparison.csv").exists() else pd.DataFrame()
 
     sample_html = _render_sample(records, features)
     metrics_html = _render_metrics(metrics)
@@ -202,8 +204,28 @@ def _render_data_source(config: dict[str, Any]) -> str:
 <li><code>SepsisLabel</code> is required, numeric, non-missing, and limited to 0 or 1.</li>
 <li>Present recognized clinical/context fields must contain numeric values where non-missing; absent fields are allowed.</li>
 <li>If <code>ICULOS</code> is present, values must be numeric and increase by exactly one row at a time. It is not a predictor.</li></ul>
-<p>No physiologic range checks, unit normalization, or outlier correction are applied. When <code>ICULOS</code> is absent, hour contiguity is assumed from row order and cannot be independently checked.</p></div>
+{_render_quality(config.get("quality", {}))}
+<p>When <code>ICULOS</code> is absent, hour contiguity is assumed from row order and cannot be independently checked.</p></div>
 </div></section>'''
+
+
+def _render_quality(quality: dict[str, Any]) -> str:
+    rules = quality.get("rules", [])
+    if quality.get("ruleset", "none") == "none" or not rules:
+        return "<p>No physiologic range checks, unit normalization, or outlier correction are applied.</p>"
+    rows = "".join(
+        f"<tr><td>{html.escape(rule['rule_id'])}</td><td>{html.escape(rule['action'])}</td>"
+        f"<td>{rule['values_changed']:,}</td><td>{rule['patients_affected']:,}</td></tr>"
+        for rule in rules
+    )
+    return (
+        f"<h3>Data quality rules ({html.escape(quality['ruleset'])})</h3>"
+        f"<p>Applied after loading and before EDA, cohort construction, and features. {quality.get('values_changed', 0):,} of "
+        f"{quality.get('observed_values', 0):,} observed values were changed; SepsisLabel and ICULOS are never changed. "
+        "Rules and their evidence are described in the data review.</p>"
+        '<div class="table-wrap"><table><thead><tr><th>Rule</th><th>Action</th><th>Values</th><th>Patients</th></tr></thead>'
+        f"<tbody>{rows}</tbody></table></div>"
+    )
 
 
 def _render_metrics(metrics: dict[str, dict[str, Any]]) -> str:

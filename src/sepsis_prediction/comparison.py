@@ -37,6 +37,7 @@ def summarise_runs(runs: dict[str, Path]) -> tuple[pd.DataFrame, pd.DataFrame]:
         cohort_rows.append({
             "run": name,
             "data": "synthetic" if config.get("synthetic_demo") else "PhysioNet 2019",
+            "quality_rules": config.get("quality", {}).get("ruleset", "none"),
             "split_mode": config.get("split_mode", "pooled"),
             "train_sources": ", ".join(config.get("train_sources") or []) or "all",
             "test_sources": ", ".join(config.get("test_sources") or []) or "all",
