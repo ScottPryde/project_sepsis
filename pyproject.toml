@@ -27,6 +27,9 @@ sepsis-pipeline = "sepsis_prediction.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+sepsis_prediction = ["web/*.html", "web/*.js"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

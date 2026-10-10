@@ -24,6 +24,8 @@ python -m pip install -e ".[dev]"
 
 Install the optional model libraries only when needed: `python -m pip install -e ".[xgboost]"` for XGBoost and `python -m pip install -e ".[cnn]"` for the CNN.
 
+To install into the project virtual environment explicitly, run `.\.venv\Scripts\python.exe -m pip install -e ".[dev,cnn,xgboost]"`. In VS Code, select `.venv\Scripts\python.exe` as the workspace interpreter; installing with a different interpreter places packages in a different environment.
+
 ## Data Setup
 
 Obtain the PhysioNet Challenge 2019 dataset from <https://physionet.org/content/challenge-2019/1.0.0/> and follow its access and usage terms. Point the commands at a directory containing `.psv` files, one patient per file. Keep downloaded data outside version control; `data/` and common output directories are ignored.
@@ -62,9 +64,12 @@ Install `python -m pip install -e ".[dev,cnn,xgboost]"` before running the demo.
 
 Choose models with `--models logistic_regression random_forest xgboost`. Add `--cnn --cnn-epochs 20` to train the PyTorch CNN. The CNN and tabular models share one stratified patient split; CNN early stopping uses validation loss. Run `python -m sepsis_prediction.cli` in place of the installed command when working from a source checkout.
 
+Start the JavaScript application from the project environment with `.\.venv\Scripts\python.exe -m sepsis_prediction.cli serve --synthetic-demo --output-dir .\outputs\synthetic_e2e`. For clinical data, use `.\.venv\Scripts\python.exe -m sepsis_prediction.cli serve --data-dir .\data\train --output-dir .\artifacts`. Open the printed local URL. Each model has its own run button, elapsed timer, results, and model-specific charts; runs are serialized and refresh the relevant panel on completion. The full generated report remains available inside the application. The server binds only to loopback.
+
 ## Outputs
 
-- `report.html`: self-contained visual report with held-out results and charts, raw six-hour sample observations, engineered-feature sample, and pipeline/data-lineage diagrams. It embeds patient-derived values; share and store it according to dataset and institutional privacy requirements.
+- The `serve` command opens the JavaScript pipeline application. Its model panels can run Logistic Regression, Random Forest, XGBoost, or the CNN independently, with completion timing, metrics, feature signals, and model-specific charts. A full generated report remains available in the application and as `report.html`.
+- The report describes the PhysioNet 2019 PSV datasource, sorted file ingestion, required target checks, numeric field validation, optional fields, and `ICULOS` continuity checks. Physiologic range validation and unit normalization are not performed.
 - `cohort_summary.json`: eligible outcome counts, configured horizon, and exclusion counts, including incomplete negative follow-up.
 - `metrics.json`: AUROC, average precision/AUPRC, sensitivity, specificity, precision, F1, accuracy, Brier score, validation-selected threshold, and confusion matrix. AUROC/AUPRC are `null` if the test split has only one class.
 - `model_comparison.csv` and `model_curves.png`: held-out comparison table and ROC/precision-recall plots.
@@ -76,6 +81,7 @@ Choose models with `--models logistic_regression random_forest xgboost`. Add `--
 - `logistic_regression.joblib` and `random_forest.joblib`: fitted preprocessing-plus-model pipelines.
 - `xgboost.joblib`: fitted XGBoost pipeline when selected.
 - `cnn_1d.pt`: CNN weights and train-fitted imputation/scaling values when `--cnn` is selected.
+- App-driven per-model runs are isolated under `<output-dir>/models/<model>/` so one model refresh does not overwrite another model's artifacts.
 
 The `eda` command writes `dataset_summary.json`, `missingness.csv`, `record_lengths.csv`, `labels_by_hour.csv`, corresponding PNG plots, and its own `report.html`. EDA summaries are descriptive and include raw loaded records, not only the model cohort.
 

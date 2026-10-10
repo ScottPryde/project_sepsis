@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -14,8 +15,15 @@ import pandas as pd
 
 
 def main() -> None:
+    os.environ["OMP_NUM_THREADS"] = "1"
     parser = argparse.ArgumentParser(description="Run the workflow on fabricated, non-clinical records.")
     parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument(
+        "--model",
+        choices=("logistic_regression", "random_forest", "xgboost", "cnn_1d"),
+        default=None,
+        help="run one model only; the CNN uses Logistic Regression for its shared split",
+    )
     args = parser.parse_args()
     project_root = Path(__file__).resolve().parents[1]
     output_dir = args.output_dir or project_root / "outputs" / "synthetic_e2e"
@@ -55,20 +63,33 @@ def main() -> None:
                 frame.loc[1:3, "O2Sat"] = np.nan
             frame.to_csv(data_dir / f"patient_{patient:03d}.psv", sep="|", index=False)
 
-        commands = [
-            [sys.executable, "-m", "sepsis_prediction.cli", "validate", "--data-dir", str(data_dir)],
-            [
+        commands = []
+        if args.model is None:
+            commands.extend([
+                [sys.executable, "-m", "sepsis_prediction.cli", "validate", "--data-dir", str(data_dir)],
+                [
                 sys.executable, "-m", "sepsis_prediction.cli", "eda",
                 "--data-dir", str(data_dir), "--output-dir", str(output_dir / "eda"),
-            ],
-            [
-                sys.executable, "-m", "sepsis_prediction.cli", "run",
-                "--data-dir", str(data_dir), "--output-dir", str(output_dir / "run"),
-                "--models", "logistic_regression", "random_forest", "xgboost",
-                "--cnn", "--cnn-epochs", "1", "--random-state", "2026",
-                "--synthetic-demo",
-            ],
+                ],
+            ])
+        if args.model == "cnn_1d":
+            selected_models = ("logistic_regression",)
+            run_cnn = True
+        elif args.model:
+            selected_models = (args.model,)
+            run_cnn = False
+        else:
+            selected_models = ("logistic_regression", "random_forest", "xgboost")
+            run_cnn = True
+        run_command = [
+            sys.executable, "-m", "sepsis_prediction.cli", "run",
+            "--data-dir", str(data_dir), "--output-dir", str(output_dir / "run"),
+            "--models", *selected_models,
+            "--random-state", "2026", "--synthetic-demo",
         ]
+        if run_cnn:
+            run_command.extend(["--cnn", "--cnn-epochs", "1"])
+        commands.append(run_command)
         for command in commands:
             result = subprocess.run(command, cwd=project_root, text=True, capture_output=True)
             print(result.stdout.strip())
@@ -78,14 +99,16 @@ def main() -> None:
 
     report_path = output_dir / "run" / "report.html"
     report = report_path.read_text(encoding="utf-8")
-    required_sections = (
+    required_sections = [
         "Model results",
         "Sample of source observations",
         "Pipeline and data lineage",
         "Discrimination curves",
-        "cnn_1d",
-        "xgboost",
-    )
+    ]
+    if args.model in (None, "cnn_1d"):
+        required_sections.append("cnn_1d")
+    if args.model in (None, "xgboost"):
+        required_sections.append("xgboost")
     missing_sections = [section for section in required_sections if section.lower() not in report.lower()]
     if missing_sections:
         raise RuntimeError(f"Generated HTML report is missing sections: {missing_sections}")

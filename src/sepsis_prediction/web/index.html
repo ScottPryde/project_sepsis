@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>Sepsis Prediction | Pipeline App</title>
+<style>
+:root { color-scheme: light; --ink:#172625; --muted:#536461; --line:#d5dfdb; --paper:#f1f4f0; --white:#fff; --teal:#087c72; --blue:#3d7085; --gold:#ba7827; --red:#a9473e; --font:"Aptos","Segoe UI",sans-serif; }
+* { box-sizing:border-box; }
+body { margin:0; color:var(--ink); background:var(--paper); font:15px/1.5 var(--font); }
+header { padding:22px clamp(18px,4vw,54px); background:#143d3a; color:#fff; border-bottom:4px solid var(--gold); }
+header p { margin:3px 0 0; color:#d2e3dd; }
+h1 { margin:0; font-size:26px; }
+main { max-width:1400px; margin:0 auto; padding:22px clamp(14px,3vw,36px) 52px; }
+section { padding:22px 0; border-bottom:1px solid var(--line); }
+h2 { margin:0 0 12px; font-size:20px; }
+h3 { margin:0 0 8px; font-size:16px; }
+p { margin:6px 0 12px; }
+.lede { max-width:90ch; color:var(--muted); }
+.notice { padding:12px 15px; border-left:4px solid var(--red); background:#fff5f1; }
+.source-grid,.model-grid,.chart-grid,.summary-grid { display:grid; gap:12px; }
+.source-grid { grid-template-columns:repeat(auto-fit,minmax(min(100%,360px),1fr)); }
+.model-grid { grid-template-columns:repeat(auto-fit,minmax(min(100%,540px),1fr)); align-items:start; }
+.summary-grid { grid-template-columns:repeat(auto-fit,minmax(135px,1fr)); }
+.model-panel,.source-panel,.summary-item { min-width:0; background:var(--white); border:1px solid var(--line); border-radius:4px; }
+.model-panel { padding:16px; border-top:3px solid var(--model-color,var(--teal)); }
+.source-panel { padding:14px 16px; }
+.summary-item { padding:12px; border-top:3px solid var(--teal); }
+.summary-item strong { display:block; font-size:22px; }
+.summary-item span,.muted { color:var(--muted); font-size:13px; }
+.actions { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:12px 0; }
+button { min-height:38px; padding:7px 12px; border:0; border-radius:4px; background:var(--teal); color:#fff; font:inherit; font-weight:700; cursor:pointer; }
+button:hover:not(:disabled) { background:#05675f; }
+button:focus-visible { outline:3px solid var(--gold); outline-offset:2px; }
+button:disabled { opacity:.55; cursor:wait; }
+.job-status { min-height:22px; color:var(--muted); font-size:13px; }
+.metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:8px; margin:12px 0; }
+.metric { padding:9px; background:#f2f6f4; border-radius:3px; }
+.metric strong { display:block; font-size:17px; }
+.metric span { color:var(--muted); font-size:12px; }
+.chart-grid { grid-template-columns:repeat(auto-fit,minmax(min(100%,250px),1fr)); margin-top:12px; }
+.chart { min-width:0; padding:10px; border:1px solid var(--line); background:#fff; }
+.chart img { display:block; width:100%; height:auto; }
+.chart figcaption { color:var(--muted); font-size:12px; }
+.review { padding:10px 12px; background:#f5f7f5; border-left:3px solid var(--model-color,var(--blue)); }
+.pipeline-line { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+.pipeline-line span { padding:8px 10px; background:#fff; border:1px solid var(--line); border-radius:3px; }
+.pipeline-line b { color:var(--teal); }
+ul { padding-left:20px; }
+li { margin:4px 0; }
+details { margin-top:12px; padding:12px; background:#fff; border:1px solid var(--line); }
+summary { cursor:pointer; font-weight:700; }
+iframe { display:block; width:100%; height:78vh; margin-top:12px; border:1px solid var(--line); background:#fff; }
+.empty { padding:18px; color:var(--muted); background:#fff; border:1px dashed var(--line); }
+@media(max-width:600px) { header { padding:18px; } .chart-grid { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Early Sepsis Prediction</h1>
+  <p>Pipeline application · PhysioNet 2019 study workflow</p>
+</header>
+<main>
+  <div class="notice"><strong>Research use only.</strong> Retrospective results are not clinically validated. Reports may contain patient-derived information.</div>
+
+  <section aria-labelledby="source-heading">
+    <h2 id="source-heading">Datasource, ingestion, and validation</h2>
+    <div class="source-grid">
+      <article class="source-panel">
+        <h3>Datasource</h3>
+        <p id="datasource-description">PhysioNet/Computing in Cardiology Challenge 2019 early-sepsis dataset. One pipe-separated PSV file per patient, with hourly observations and a SepsisLabel target. Clinical data are external and are not bundled.</p>
+        <p class="muted">The known schema has 39 clinical/context inputs. Optional or absent input fields are allowed and remain missing for fit-only imputation.</p>
+      </article>
+      <article class="source-panel">
+        <h3>Field-level checks</h3>
+        <ul>
+          <li>Reject duplicate column names.</li>
+          <li>Require numeric, non-missing SepsisLabel values in {0, 1}.</li>
+          <li>Require present known clinical/context fields to be numeric where observed.</li>
+          <li>When ICULOS is present, require numeric values increasing by one row; never use it as a predictor.</li>
+        </ul>
+        <p class="muted">No physiologic range validation, unit normalization, or outlier correction is applied. Without ICULOS, hourly continuity is assumed from row order.</p>
+      </article>
+      <article class="source-panel">
+        <h3>Processing</h3>
+        <p>Files are discovered by <code>*.psv</code> and sorted by filename. Each file is parsed with the pipe delimiter and its filename stem becomes the patient key. Cohort construction uses rows 0–5 as input, a bounded outcome horizon, stratified fit/validation/test partitions, and fit-only preprocessing.</p>
+      </article>
+    </div>
+  </section>
+
+  <section aria-labelledby="study-heading">
+    <h2 id="study-heading">Study snapshot and methodology</h2>
+    <div id="study-summary" class="summary-grid"><p class="empty">No run summary is available yet.</p></div>
+    <div class="pipeline-line" aria-label="Shared processing pipeline">
+      <span>PSV ingestion</span><b>→</b><span>Field validation</span><b>→</b><span>Patient cohort</span><b>→</b><span>Fit / validation / test</span><b>→</b><span>Model-specific evaluation</span>
+    </div>
+    <p class="muted">SepsisLabel switches on six hours before Sepsis-3 onset in this dataset. The outcome is the dataset label within the configured horizon, not a direct onset-time estimate.</p>
+  </section>
+
+  <section aria-labelledby="models-heading">
+    <h2 id="models-heading">Model runs</h2>
+    <p class="lede">Each action reruns one model into its own output directory. Runs are serialized; elapsed time and completion state update here, followed by refreshed metrics and charts.</p>
+    <div id="model-grid" class="model-grid"><p class="empty">Loading model results...</p></div>
+  </section>
+
+  <section aria-labelledby="lineage-heading">
+    <h2 id="lineage-heading">Data lineage</h2>
+    <p>Patient files supply both predictors and labels, but from disjoint time ranges. Only rows 0–5 enter features; later SepsisLabel values define the bounded outcome. Patient identifiers are split metadata, never model inputs.</p>
+    <div class="pipeline-line">
+      <span>Rows 0–5<br><small>predictors</small></span><b>→</b><span>Tabular summaries or ordered values + masks</span><b>→</b><span>Train-only transforms</span><b>→</b><span>Model-specific predictions</span><b>→</b><span>Held-out metrics</span>
+    </div>
+  </section>
+
+  <details id="full-report"><summary>Full generated report</summary><iframe title="Full generated experiment report" src="/report.html"></iframe></details>
+</main>
+<script src="/app.js" defer></script>
+</body>
+</html>

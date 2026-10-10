@@ -12,6 +12,7 @@ from sepsis_prediction.eda import run_eda
 from sepsis_prediction.features import DEFAULT_HORIZON_HOURS, create_examples, create_sequence_examples
 from sepsis_prediction.modeling import run_experiment
 from sepsis_prediction.reporting import write_html_report, write_model_comparison
+from sepsis_prediction.application import serve_application
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -54,11 +55,53 @@ def _parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--cnn", action="store_true", help="also train the optional PyTorch 1D CNN")
     run.add_argument("--cnn-epochs", type=int, default=20)
+
+    serve = commands.add_parser("serve", help="serve the JavaScript pipeline application")
+    serve.add_argument("--data-dir", type=Path)
+    serve.add_argument("--output-dir", type=Path, default=Path("outputs/synthetic_e2e"))
+    serve.add_argument("--synthetic-demo", action="store_true", help="rerun the fabricated end-to-end demo")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8765)
+    serve.add_argument("--test-size", type=float, default=0.2)
+    serve.add_argument("--validation-size", type=float, default=0.2)
+    serve.add_argument("--random-state", type=int, default=42)
+    serve.add_argument("--threshold", type=float, default=None)
+    serve.add_argument("--target-sensitivity", type=float, default=0.8)
+    serve.add_argument("--horizon-hours", type=int, default=DEFAULT_HORIZON_HOURS)
+    serve.add_argument(
+        "--models", nargs="+", choices=("logistic_regression", "random_forest", "xgboost"),
+        default=("logistic_regression", "random_forest"),
+    )
+    serve.add_argument("--cnn", action="store_true")
+    serve.add_argument("--cnn-epochs", type=int, default=20)
     return parser
 
 
 def main() -> None:
     args = _parser().parse_args()
+    if args.command == "serve":
+        if not args.synthetic_demo and args.data_dir is None:
+            raise SystemExit("serve requires --data-dir unless --synthetic-demo is selected")
+        serve_application(
+            output_dir=args.output_dir,
+            data_dir=args.data_dir,
+            synthetic_demo=args.synthetic_demo,
+            host=args.host,
+            port=args.port,
+            run_options={
+                "test_size": args.test_size,
+                "validation_size": args.validation_size,
+                "random_state": args.random_state,
+                "threshold": args.threshold,
+                "target_sensitivity": args.target_sensitivity,
+                "horizon_hours": args.horizon_hours,
+                "models": args.models,
+                "cnn": args.cnn,
+                "cnn_epochs": args.cnn_epochs,
+            },
+        )
+        return
+
     records = load_patient_files(args.data_dir)
     if args.command == "validate":
         report = {
